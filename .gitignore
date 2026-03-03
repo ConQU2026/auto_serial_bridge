@@ -32,3 +32,6 @@ _codeql_detected_source_root
 # output_file
 mcu_output/
 include/auto_serial_bridge/generated_bindings.hpp
+
+# Local config
+config/protocol.yaml

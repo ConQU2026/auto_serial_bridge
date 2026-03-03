@@ -37,6 +37,7 @@ auto_serial_bridge/
 ```bash
 sudo apt install ros-humble-serial-driver libasio-dev ros-humble-rclcpp-components ros-humble-io-context 
 sudo apt install python3-serial socat
+sudo apt install ros-humble-asio-cmake-module
 ```
 
 ### 2. 配置串口权限(可选)
@@ -50,6 +51,12 @@ sudo ./auto_udev.sh
 ```
 
 ### 2. 配置`protocol.yaml`文件
+
+项目提供了一个名为 `config/protocol-sample.yaml` 的示例文件。在开始之前，请将其复制为 `protocol.yaml`（该文件已被加入 `.gitignore`，不会被 Git 追踪，方便你在本地进行自定义配置）：
+
+```bash
+cp config/protocol-sample.yaml config/protocol.yaml
+```
 
 核心配置文件位于 `config/protocol.yaml`。可通过修改此文件来增删改数据协议，**修改后重新编译即可生效**。
 
@@ -68,7 +75,7 @@ config:
   buffer_size: 256
   head_byte_1: 0x5A      # 双帧头 1
   head_byte_2: 0xA5      # 双帧头 2
-  checksum: "CRC8"       # 校验算法 TODO: 支持CRC16或简单的SUM8
+  checksum: "CRC8"       # 校验算法
 ```
 
 #### 消息定义
@@ -87,29 +94,32 @@ messages:
       - { proto: "angular_z", type: "f32", ros: "angular.z" }
 ```
 
-#### MCU 端集成
+### 3. MCU 端集成与协议文档
 
-当你在 ROS2 端运行 `colcon build` 后，`mcu_output` 目录下会自动更新生成的 C 代码：
+当你在 ROS2 端运行 `colcon build` 后，`mcu_output` 目录下会自动生成相关文件：
+
+#### 协议文档 (PROTOCOL_DOC.md)
+`mcu_output/PROTOCOL_DOC.md` 是**自动生成**的通信协议文档，它清晰地列出了：
+*   所有消息的 ID、方向、数据结构定义。
+*   每个字段的字节偏移量和 C 语言类型。
+*   **这是提供给电控开发人员最直接的参考文档。**
+
+#### 生成的 C 代码
 *   `protocol.c`: 协议打包与解包实现。
 *   `protocol.h`: 协议结构体与函数声明。
 
 **电控开发人员集成步骤：**
-```C
-// 类似cubemx, 写在这种块之间的代码将受到保护不会被覆盖(当重新生成代码时)
-/* USER CODE BEGIN  */
-/* USER CODE END  */
-```
-
-> [!WARNING]
-> 注意, 目前版本强制要求上下位机进行握手(验证版本hash), 所以电控需要在第一次接收到数据之后, 使用生成的protocol.c中的send_handshake( )发送一次握手包。
-
-
 1.  将 `mcu_output` 文件夹内容复制到单片机工程中。
 2.  实现 `serial_write` 等底层发送接口。
 3.  调用 `protocol.h` 中的 `pack_*` 和 `unpack_*` 接口进行数据收发。
 
+> [!TIP]
+> 代码生成器支持类似 CubeMX 的用户代码保护功能，在 `/* USER CODE BEGIN */` 和 `/* USER CODE END */` 之间的代码在重新生成时不会被覆盖。
 
-### 2. 编译项目
+> [!IMPORTANT]
+> **握手要求**：目前版本强制要求上下位机进行版本握手。电控在接收到 ROS 的握手包后，必须使用 `send_Handshake()` 回复相同的 `protocol_hash`。
+
+### 4. 编译项目
 
 在你的 ROS2 工作空间根目录下：
 
@@ -118,9 +128,8 @@ colcon build --packages-select auto_serial_bridge
 source install/setup.bash
 ```
 
-
-## 4. 运行
-在配置完yaml文件并且编译成功之后, 即可直接通过运行节点的方式启动, 也可以通过launhch的方式启动(推荐)
+## 5. 运行
+在配置完yaml文件并且编译成功之后, 即可直接通过运行节点的方式启动, 也可以通过launch的方式启动(推荐)
 
 我们提供了两种示例, 一种是使用节点的方式启动, 一种是使用组件化方式启动
 
@@ -137,10 +146,14 @@ colcon test --packages-select auto_serial_bridge --event-handlers console_direct
 ## 更新日志
 
 *   **v1.0**: 实现了基于 `protocol.yaml` 的全自动代码生成。
-    *   仅需在 `protocol.yaml` 中添加需要的协议, 即可自动生成对应的 ROS2 和电控的代码。
-*   **Beta**: 初始验证版本，需在代码中手动添加相应的数据解析逻辑。
-
+    *   **核心特性**：
+        *   支持 `protocol.yaml` 配置变化检测，仅在配置更改时触发重新生成。
+        *   自动生成面向电控的协议文档 `PROTOCOL_DOC.md`。
+        *   支持双向心跳检测（Heartbeat）与版本哈希握手（Handshake）。
+        *   支持用户代码块保护，增量式开发更友好。
+*   **Beta**: 初始验证版本。
 
 ## TODO
 - 增加多个校验协议可选项
-- 预设多个串口通信配置, 用于适配不同场景, 比如easy模式追求快速与简单, 就去掉握手和校验和等
+- 预设多个串口通信配置，用于适配不同场景（如：Easy 模式去掉握手和校验）
+- 支持动态调参

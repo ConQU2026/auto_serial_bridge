@@ -23,6 +23,27 @@ type_mappings:
 
 messages:
 
+  # 3.0 系统消息
+  - name: "Heartbeat"
+    id: 0x00
+    direction: "both"
+    sub_topic: "/task/heartbeat"
+    pub_topic: "/task/heartbeat"
+    ros_msg: "std_msgs/msg/UInt32"
+    notes: "握手完成后，电控应以固定周期（建议 100ms）持续发送心跳，ROS 侧也会同频回应。count 字段单调递增，从 0 开始。"
+    fields:
+      - { proto: "count", type: "u32", ros: "data" }
+
+  - name: "Handshake"
+    id: 0xFF
+    direction: "both"
+    sub_topic: "/task/handshake"
+    pub_topic: "/task/handshake"
+    ros_msg: "std_msgs/msg/UInt32"
+    notes: "上电后 ROS 主动发起握手，电控收到后用相同的 protocol_hash 原样回复。握手通过后方可发送其他数据帧，且整个连接周期内只需执行一次。protocol_hash 值见【全局参数】。"
+    fields:
+      - { proto: "protocol_hash", type: "u32", ros: "data" }
+
 
   # 底盘移动控制
   - name: "CmdVel"
@@ -35,13 +56,13 @@ messages:
       - { proto: "linear_y",  type: "f32", ros: "linear.y" }
       - { proto: "angular_z", type: "f32", ros: "angular.z" }
 
-  # 状态转换控制 (2.1-2.6 统一状态话题)
+  # 状态转换控制
   - name: "GenericStatus"
     id: 0x19
     direction: "both"
     sub_topic: "/task/generic_status"
     pub_topic: "/task/generic_status"
-    ros_msg: "std_msgs/msg/Float32MultiArray" # 映射逻辑：[task_idx, tx_id, tx_status, rx_id, rx_status]
+    ros_msg: "std_msgs/msg/Float32MultiArray"
     fields:
       - { proto: "task_index", type: "f32", ros: "data[0]" }
       - { proto: "tx_id",      type: "f32", ros: "data[1]" }
@@ -49,7 +70,7 @@ messages:
       - { proto: "rx_id",      type: "f32", ros: "data[3]" }
       - { proto: "rx_status",  type: "f32", ros: "data[4]" }
 
-  # 2.2 武器对接反馈 (TX 高频)
+  # 2.2 武器对接反馈
   - name: "WeaponDockFeedback"
     id: 0x02
     direction: "tx"
@@ -60,7 +81,7 @@ messages:
       - { proto: "y_error",     type: "f32", ros: "y" }
       - { proto: "pitch_error", type: "f32", ros: "z" }
 
-  # 2.3 上/下台阶定位 (Action Goal)
+  # 2.3 上/下台阶定位
   - name: "StairPoseGoal"
     id: 0x03
     direction: "tx"
@@ -89,44 +110,3 @@ messages:
       - { proto: "y",   type: "f32", ros: "position.y" }
       - { proto: "z",   type: "f32", ros: "position.z" }
       - { proto: "yaw", type: "f32", ros: "orientation.z" }
-
-  # 2.5 九宫格：放置 KFS
-  - name: "GridPlaceGoal"
-    id: 0x06
-    direction: "tx"
-    sub_topic: "/task/grid_place/_public_goal"
-    ros_msg: "geometry_msgs/msg/Point"
-    fields:
-      - { proto: "x", type: "f32", ros: "x" }
-      - { proto: "y", type: "f32", ros: "y" }
-      - { proto: "z", type: "f32", ros: "z" }
-
-  # 2.6 九宫格：武器攻击
-  - name: "GridAttackGoal"
-    id: 0x07
-    direction: "tx"
-    sub_topic: "/task/grid_attack/_public_goal"
-    ros_msg: "geometry_msgs/msg/Point"
-    fields:
-      - { proto: "x", type: "f32", ros: "x" }
-      - { proto: "y", type: "f32", ros: "y" }
-      - { proto: "z", type: "f32", ros: "z" }
-
-  # 3.0 系统消息
-  - name: "Heartbeat"
-    id: 0x00
-    direction: "both"
-    sub_topic: "/task/heartbeat"
-    pub_topic: "/task/heartbeat"
-    ros_msg: "std_msgs/msg/UInt32"
-    fields:
-      - { proto: "count", type: "u32", ros: "data" }
-
-  - name: "Handshake"
-    id: 0xFF
-    direction: "both"
-    sub_topic: "/task/handshake"
-    pub_topic: "/task/handshake"
-    ros_msg: "std_msgs/msg/UInt32"
-    fields:
-      - { proto: "protocol_hash", type: "u32", ros: "data" }

@@ -324,6 +324,16 @@ void protocol_fsm_feed(uint8_t byte) {
                 
         f.write("\n")
         f.write(render_block(user_blocks, "Code_1"))
+        
+        # --- 6. 生成建议的消息发送模板 (如 Heartbeat) ---
+        f.write("\n/*\n// --- 建议的消息发送模板 (以 Heartbeat 为例) ---\n")
+        f.write("// 建议在定时器回调或主循环中以固定频率调用\n\n")
+        f.write("void heartbeat_timer_callback(void) {\n")
+        f.write("    static uint32_t hb_count = 0;\n")
+        f.write("    Packet_Heartbeat pkt;\n")
+        f.write("    pkt.count = hb_count++;\n")
+        f.write("    send_Heartbeat(&pkt);\n")
+        f.write("}\n*/\n")
         f.write("\n")
 
 def generate_ros_bindings(messages, type_mappings, output_path):
@@ -475,6 +485,140 @@ def generate_cpp_config(config, output_path):
         f.write("\n}\n")
         f.write("}\n")
 
+
+# C 类型字节长度映射
+_C_TYPE_SIZES = {
+    "uint8_t":  1,
+    "uint16_t": 2,
+    "uint32_t": 4,
+    "int32_t":  4,
+    "float":    4,
+}
+
+
+def _field_table(fields: list, type_mappings: dict) -> str:
+    """渲染字段信息为 Markdown 表格字符串。
+
+    Args:
+        fields: 协议字段定义列表。
+        type_mappings: YAML 类型到 C 类型的映射。
+
+    Returns:
+        Markdown 表格字符串，包含字节偏移、字段名、类型、字节数列。
+    """
+    lines = [
+        "| 字节偏移 | 字段名 | C 类型 | 字节数 |",
+        "| :------: | :----- | :----- | :----: |",
+    ]
+    offset = 0
+    for field in fields:
+        c_type = type_mappings.get(field['type'], field['type'])
+        size = _C_TYPE_SIZES.get(c_type, 1)
+        lines.append(f"| {offset} | `{field['proto']}` | `{c_type}` | {size} |")
+        offset += size
+    lines.append(f"| **{offset}** | *(CRC8)* | `uint8_t` | 1 |")
+    return "\n".join(lines)
+
+
+def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
+                    protocol_hash: int, output_path: str) -> None:
+    """生成面向电控的 Markdown 通信协议文档。
+
+    文档包含帧格式说明、电控发送/接收的消息列表及字段表格。
+
+    Args:
+        config: 全局配置字典（头字节、波特率等）。
+        messages: 消息定义列表。
+        type_mappings: YAML 类型到 C 类型的映射。
+        protocol_hash: 协议哈希，用于握手校验。
+        output_path: 输出 Markdown 文件路径。
+    """
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    head1 = config['head_byte_1']
+    head2 = config['head_byte_2']
+    baudrate = config.get('baudrate', 115200)
+    checksum = config.get('checksum', 'CRC8')
+
+    # 按方向分组
+    rx_msgs  = [m for m in messages if m['direction'] in ('rx', 'both')]   # MCU → ROS
+    tx_msgs  = [m for m in messages if m['direction'] in ('tx', 'both')]   # ROS → MCU
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        # ── 文件头 ──
+        f.write("# MCU ↔ ROS 串口通信协议文档\n\n")
+        f.write("> **Auto-generated** — 由 `scripts/codegen.py` 根据 `config/protocol.yaml` 生成，请勿手动修改。\n\n")
+        f.write("---\n\n")
+
+        # ── 全局参数 ──
+        f.write("## 全局参数\n\n")
+        f.write(f"| 参数 | 值 |\n")
+        f.write(f"| :--- | :--- |\n")
+        f.write(f"| 波特率 | `{baudrate}` |\n")
+        f.write(f"| 帧头字节 1 | `{head1:#04x}` |\n")
+        f.write(f"| 帧头字节 2 | `{head2:#04x}` |\n")
+        f.write(f"| 校验算法 | `{checksum}` |\n")
+        f.write(f"| 协议哈希（握手用）| `0x{protocol_hash:08X}` |\n")
+        f.write("\n---\n\n")
+
+        # ── 帧格式 ──
+        f.write("## 帧格式\n\n")
+        f.write("每帧结构如下（小端序）：\n\n")
+        f.write("| 字节位置 | 字段 | 说明 |\n")
+        f.write("| :------: | :--- | :--- |\n")
+        f.write(f"| 0 | Header1 | 固定 `{head1:#04x}` |\n")
+        f.write(f"| 1 | Header2 | 固定 `{head2:#04x}` |\n")
+        f.write("| 2 | ID | 消息 ID，见下表 |\n")
+        f.write("| 3 | Len | 数据段字节数 |\n")
+        f.write("| 4 … 4+Len-1 | Data | 各字段按结构体内存布局排列 |\n")
+        f.write("| 4+Len | CRC8 | 覆盖 ID + Len + Data，多项式 `0x31` |\n")
+        f.write("\n---\n\n")
+
+        # ── 电控需要发送给 ROS（MCU → ROS） ──
+        f.write("## 电控 → ROS（电控主动发送）\n\n")
+        if rx_msgs:
+            for msg in rx_msgs:
+                total_bytes = sum(
+                    _C_TYPE_SIZES.get(type_mappings.get(f['type'], f['type']), 1)
+                    for f in msg['fields']
+                )
+                f.write(f"### `{msg['name']}` — ID `{msg['id']:#04x}`\n\n")
+                f.write(f"- **ROS 话题**：`{msg.get('pub_topic', 'N/A')}`\n")
+                f.write(f"- **ROS 消息类型**：`{msg['ros_msg']}`\n")
+                f.write(f"- **数据段字节数（Len）**：`{total_bytes}`\n")
+                if msg.get('notes'):
+                    f.write(f"- **注意事项**：{msg['notes']}\n")
+                f.write("\n")
+                f.write(_field_table(msg['fields'], type_mappings))
+                f.write("\n\n")
+        else:
+            f.write("_无_\n\n")
+
+        f.write("---\n\n")
+
+        # ── ROS 发送给电控（ROS → MCU） ──
+        f.write("## ROS → 电控（电控被动接收）\n\n")
+        if tx_msgs:
+            for msg in tx_msgs:
+                total_bytes = sum(
+                    _C_TYPE_SIZES.get(type_mappings.get(f['type'], f['type']), 1)
+                    for f in msg['fields']
+                )
+                f.write(f"### `{msg['name']}` — ID `{msg['id']:#04x}`\n\n")
+                f.write(f"- **ROS 话题**：`{msg.get('sub_topic', 'N/A')}`\n")
+                f.write(f"- **ROS 消息类型**：`{msg['ros_msg']}`\n")
+                f.write(f"- **数据段字节数（Len）**：`{total_bytes}`\n")
+                if msg.get('notes'):
+                    f.write(f"- **注意事项**：{msg['notes']}\n")
+                f.write("\n")
+                f.write(_field_table(msg['fields'], type_mappings))
+                f.write("\n\n")
+        else:
+            f.write("_无_\n\n")
+
+        f.write("---\n\n")
+        f.write("*文档由构建系统自动生成，版本以协议哈希为准。*\n")
+
 def main():
     if len(sys.argv) < 3:
         print("Usage: codegen.py <protocol_yaml> <output_dir>")
@@ -519,6 +663,9 @@ def main():
                         
     generate_ros_bindings(config_data['messages'], config_data['type_mappings'], 
                           os.path.join(output_dir, 'include', 'auto_serial_bridge', 'generated_bindings.hpp'))
+
+    generate_mcu_doc(config_data['config'], config_data['messages'], config_data['type_mappings'],
+                     phash, os.path.join(output_dir, 'mcu_output', 'PROTOCOL_DOC.md'))
 
 if __name__ == "__main__":
     main()

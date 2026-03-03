@@ -1,0 +1,56 @@
+name: ROS2 CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  ros2_test:
+    runs-on: ubuntu-22.04
+    container:
+      image: ros:humble-ros-base
+    
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            ros-humble-serial-driver \
+            libasio-dev \
+            ros-humble-rclcpp-components \
+            ros-humble-io-context \
+            python3-serial \
+            socat \
+            ros-humble-asio-cmake-module
+
+      - name: Build and Test
+        run: |
+          # Source ROS2 environment
+          . /opt/ros/humble/setup.sh
+          
+          # Initialize workspace (if needed, but here we are in the repo root)
+          # We'll treat the current repo as a package in a colcon workspace
+          mkdir -p ros_ws/src
+          ln -s $(pwd) ros_ws/src/auto_serial_bridge
+          cd ros_ws
+          
+          # Copy sample protocol if not present
+          if [ ! -f src/auto_serial_bridge/config/protocol.yaml ]; then
+            cp src/auto_serial_bridge/config/protocol-sample.yaml src/auto_serial_bridge/config/protocol.yaml
+          fi
+          
+          # colcon build
+          colcon build --packages-select auto_serial_bridge
+          
+          # Source local setup
+          . install/setup.sh
+          
+          # colcon test
+          colcon test --packages-select auto_serial_bridge --event-handlers console_direct+
+          
+          # Check test results
+          colcon test-result --all

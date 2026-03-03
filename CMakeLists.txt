@@ -39,15 +39,16 @@ set(MCU_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/mcu_output/protocol.h")
 set(MCU_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/mcu_output/protocol.c")
 set(ROS_BINDINGS "${CMAKE_CURRENT_SOURCE_DIR}/include/auto_serial_bridge/generated_bindings.hpp")
 set(CPP_CONFIG "${CMAKE_CURRENT_SOURCE_DIR}/include/auto_serial_bridge/generated_config.hpp")
+set(MCU_DOC "${CMAKE_CURRENT_SOURCE_DIR}/mcu_output/PROTOCOL_DOC.md")
 
 add_custom_command(
-  OUTPUT ${MCU_HEADER} ${ROS_BINDINGS} ${MCU_SOURCE} ${CPP_CONFIG}
+  OUTPUT ${MCU_HEADER} ${ROS_BINDINGS} ${MCU_SOURCE} ${CPP_CONFIG} ${MCU_DOC}
   COMMAND ${Python3_EXECUTABLE} ${CODEGEN_SCRIPT} ${PROTOCOL_YAML} ${CMAKE_CURRENT_SOURCE_DIR}
   DEPENDS ${PROTOCOL_YAML} ${CODEGEN_SCRIPT}
-  COMMENT "Generating protocol code..."
+  COMMENT "Generating protocol code and documentation..."
 )
 
-add_custom_target(generate_protocol_code DEPENDS ${MCU_HEADER} ${ROS_BINDINGS} ${MCU_SOURCE} ${CPP_CONFIG})
+add_custom_target(generate_protocol_code DEPENDS ${MCU_HEADER} ${ROS_BINDINGS} ${MCU_SOURCE} ${CPP_CONFIG} ${MCU_DOC})
 
 # ==============================================================================
 # 3. 核心库构建
