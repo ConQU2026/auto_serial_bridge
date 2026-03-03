@@ -11,7 +11,7 @@ config:
   buffer_size: 256
   head_byte_1: 0x5A      # 双帧头 1
   head_byte_2: 0xA5      # 双帧头 2
-  checksum: "CRC8"       # 校验算法 TODO: 支持CRC16或简单的SUM8
+  checksum: "CRC8"       # 校验算法
 
 # 2. 类型映射
 type_mappings:
@@ -21,49 +21,112 @@ type_mappings:
   u16: "uint16_t"
   u32: "uint32_t"
 
-# 3. 消息列表
 messages:
-  # === 握手与心跳===
-  - name: "Handshake"
-    id: 0x00
-    direction: "both"
-    sub_topic: "/serial/handshake_cmd"
-    pub_topic: "/serial/handshake"
-    ros_msg: "std_msgs/msg/UInt32" # 用于调试或记录
-    fields:
-      - { proto: "protocol_hash", type: "u32", ros: "data" } # 协议文件的 Hash 值
 
-  - name: "Heartbeat"
-    id: 0x01
-    direction: "both"
-    sub_topic: "/serial/heartbeat_cmd"
-    pub_topic: "/serial/heartbeat"
-    ros_msg: "std_msgs/msg/UInt8"
-    fields:
-      - { proto: "count", type: "u8", ros: "data" }
 
-  # === 业务消息 ===
-  # ROS -> MCU: 速度控制
+  # 底盘移动控制
   - name: "CmdVel"
-    id: 0x03
+    id: 0x01
     direction: "tx"
     sub_topic: "/cmd_vel"
-    ros_msg: "geometry_msgs/msg/Twist" # 指定 ROS 消息类型
+    ros_msg: "geometry_msgs/msg/Twist"
     fields:
-      # proto: MCU 结构体成员名 | type: MCU 类型 | ros: ROS 消息成员路径
       - { proto: "linear_x",  type: "f32", ros: "linear.x" }
-      - { proto: "linear_y", type: "f32", ros: "linear.y" }
+      - { proto: "linear_y",  type: "f32", ros: "linear.y" }
       - { proto: "angular_z", type: "f32", ros: "angular.z" }
 
+  # 状态转换控制 (2.1-2.6 统一状态话题)
+  - name: "GenericStatus"
+    id: 0x19
+    direction: "both"
+    sub_topic: "/task/generic_status"
+    pub_topic: "/task/generic_status"
+    ros_msg: "std_msgs/msg/Float32MultiArray" # 映射逻辑：[task_idx, tx_id, tx_status, rx_id, rx_status]
+    fields:
+      - { proto: "task_index", type: "f32", ros: "data[0]" }
+      - { proto: "tx_id",      type: "f32", ros: "data[1]" }
+      - { proto: "tx_status",  type: "f32", ros: "data[2]" }
+      - { proto: "rx_id",      type: "f32", ros: "data[3]" }
+      - { proto: "rx_status",  type: "f32", ros: "data[4]" }
 
-  # # MCU -> ROS: 里程计反馈
-  # - name: "ChassisStatus"
-  #   id: 0x05
-  #   direction: "rx"
-  #   pub_topic: "/odom"
-  #   ros_msg: "nav_msgs/msg/Odometry"
-  #   fields:
-  #     - { proto: "pos_x", type: "f32", ros: "pose.pose.position.x" }
-  #     - { proto: "pos_y", type: "f32", ros: "pose.pose.position.y" }
+  # 2.2 武器对接反馈 (TX 高频)
+  - name: "WeaponDockFeedback"
+    id: 0x02
+    direction: "tx"
+    sub_topic: "/task/weapon_docking/_public_feedback"
+    ros_msg: "geometry_msgs/msg/Vector3"
+    fields:
+      - { proto: "x_error",     type: "f32", ros: "x" }
+      - { proto: "y_error",     type: "f32", ros: "y" }
+      - { proto: "pitch_error", type: "f32", ros: "z" }
 
+  # 2.3 上/下台阶定位 (Action Goal)
+  - name: "StairPoseGoal"
+    id: 0x03
+    direction: "tx"
+    sub_topic: "/perception/stair_pose/_public_goal"
+    ros_msg: "geometry_msgs/msg/Vector3"
+    fields:
+      - { proto: "target_dist", type: "f32", ros: "x" }
+      - { proto: "yaw",         type: "f32", ros: "y" }
 
+  - name: "StairType"
+    id: 0x04
+    direction: "tx"
+    sub_topic: "/perception/stair_type"
+    ros_msg: "std_msgs/msg/Int32"
+    fields:
+      - { proto: "task_type",   type: "i32", ros: "data" } 
+
+  # 2.4 梅林抓取 KFS
+  - name: "MerlinPickGoal"
+    id: 0x05
+    direction: "tx"
+    sub_topic: "/task/merlin_pick/_public_goal"
+    ros_msg: "geometry_msgs/msg/Pose"
+    fields:
+      - { proto: "x",   type: "f32", ros: "position.x" }
+      - { proto: "y",   type: "f32", ros: "position.y" }
+      - { proto: "z",   type: "f32", ros: "position.z" }
+      - { proto: "yaw", type: "f32", ros: "orientation.z" }
+
+  # 2.5 九宫格：放置 KFS
+  - name: "GridPlaceGoal"
+    id: 0x06
+    direction: "tx"
+    sub_topic: "/task/grid_place/_public_goal"
+    ros_msg: "geometry_msgs/msg/Point"
+    fields:
+      - { proto: "x", type: "f32", ros: "x" }
+      - { proto: "y", type: "f32", ros: "y" }
+      - { proto: "z", type: "f32", ros: "z" }
+
+  # 2.6 九宫格：武器攻击
+  - name: "GridAttackGoal"
+    id: 0x07
+    direction: "tx"
+    sub_topic: "/task/grid_attack/_public_goal"
+    ros_msg: "geometry_msgs/msg/Point"
+    fields:
+      - { proto: "x", type: "f32", ros: "x" }
+      - { proto: "y", type: "f32", ros: "y" }
+      - { proto: "z", type: "f32", ros: "z" }
+
+  # 3.0 系统消息
+  - name: "Heartbeat"
+    id: 0x00
+    direction: "both"
+    sub_topic: "/task/heartbeat"
+    pub_topic: "/task/heartbeat"
+    ros_msg: "std_msgs/msg/UInt32"
+    fields:
+      - { proto: "count", type: "u32", ros: "data" }
+
+  - name: "Handshake"
+    id: 0xFF
+    direction: "both"
+    sub_topic: "/task/handshake"
+    pub_topic: "/task/handshake"
+    ros_msg: "std_msgs/msg/UInt32"
+    fields:
+      - { proto: "protocol_hash", type: "u32", ros: "data" }
