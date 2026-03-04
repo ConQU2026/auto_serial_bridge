@@ -153,7 +153,8 @@ namespace auto_serial_bridge
              for (size_t i = 0; i < bytes_read; ++i) {
                  ss << std::uppercase << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(buffer[i]) << " ";
              }
-             RCLCPP_INFO(this->get_logger(), "RECV HEX: %s", ss.str().c_str());
+             // Raw frame dump is only for debug-level troubleshooting.
+             RCLCPP_DEBUG(this->get_logger(), "RECV HEX: %s", ss.str().c_str());
 
              {
                  std::lock_guard<std::mutex> lock(rx_mutex_);
@@ -209,7 +210,8 @@ namespace auto_serial_bridge
         for (const auto& byte : packet_bytes) {
             ss << std::uppercase << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte) << " ";
         }
-        RCLCPP_INFO(this->get_logger(), "SEND HEX: %s", ss.str().c_str());
+        // Raw frame dump is only for debug-level troubleshooting.
+        RCLCPP_DEBUG(this->get_logger(), "SEND HEX: %s", ss.str().c_str());
 
         driver_->port()->async_send(packet_bytes);
     }

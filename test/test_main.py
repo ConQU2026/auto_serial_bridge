@@ -40,6 +40,12 @@ def load_protocol_config():
 
 PROTOCOL_CONFIG, PROTOCOL_YAML_CONTENT = load_protocol_config()
 
+if PROTOCOL_CONFIG is None:
+    raise AssertionError(
+        "Failed to load protocol config for tests. "
+        "Ensure config/protocol.yaml exists and is valid YAML."
+    )
+
 def get_config_value(key, default):
     if PROTOCOL_CONFIG and 'config' in PROTOCOL_CONFIG:
         return PROTOCOL_CONFIG['config'].get(key, default)
@@ -54,11 +60,26 @@ def get_message_id(name):
 
 def get_ros_msg_class(ros_msg_type_str):
     parts = ros_msg_type_str.split('/')
-    if len(parts) >= 3:
-        module_name = f"{parts[0]}.{parts[1]}"
-        class_name = parts[2]
-        return getattr(import_module(module_name), class_name)
-    return None
+    if len(parts) < 3:
+        raise ValueError(f"Invalid ROS message type string: {ros_msg_type_str!r}")
+
+    module_name = f"{parts[0]}.{parts[1]}"
+    class_name = parts[2]
+    try:
+        module = import_module(module_name)
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise ValueError(
+            f"Could not import ROS message module {module_name!r} "
+            f"for type {ros_msg_type_str!r}"
+        ) from exc
+
+    try:
+        return getattr(module, class_name)
+    except AttributeError as exc:
+        raise ValueError(
+            f"ROS message type {ros_msg_type_str!r} "
+            f"not found in module {module_name!r}"
+        ) from exc
 
 def get_struct_format_for_type(type_name):
     formats = {
@@ -71,12 +92,20 @@ def get_struct_format_for_type(type_name):
         'float': 'f', 'float32': 'f', 'f32': 'f',
         'double': 'd', 'float64': 'd', 'f64': 'd'
     }
-    return formats.get(type_name, 'B')
+    if type_name not in formats:
+        raise ValueError(
+            f"Unknown field type '{type_name}' in protocol configuration. "
+            f"Supported types are: {', '.join(sorted(formats.keys()))}"
+        )
+    return formats[type_name]
 
 def generate_dummy_payload(msg_config):
     fmt = '<'
     values = []
-    for field in msg_config.get('fields', []):
+    fields = msg_config.get('fields', [])
+    if not fields:
+        return b''
+    for field in fields:
         fmt += get_struct_format_for_type(field['type'])
         values.append(0)
     return struct.pack(fmt, *values)
@@ -85,8 +114,11 @@ def generate_dummy_payload(msg_config):
 HEAD1 = get_config_value('head_byte_1', 0x5A)
 HEAD2 = get_config_value('head_byte_2', 0xA5)
 ID_HANDSHAKE = get_message_id('Handshake')
-
-if ID_HANDSHAKE is None: ID_HANDSHAKE = 0x00
+if ID_HANDSHAKE is None:
+    raise AssertionError(
+        "Handshake message ID not found in protocol config. "
+        "Ensure a 'Handshake' message is defined in protocol YAML."
+    )
 
 def get_protocol_hash():
     if PROTOCOL_YAML_CONTENT:
@@ -200,7 +232,7 @@ class TestSerialController(unittest.TestCase):
         return packet
 
     def wait_for_handshake(self):
-        # 等待握手请求 (ID 0)
+        # 等待握手请求 (ID 使用配置里的 Handshake ID)
         start_time = time.time()
         buf = b''
         while time.time() - start_time < 5.0:
@@ -208,7 +240,7 @@ class TestSerialController(unittest.TestCase):
                 buf += self.serial_port.read(self.serial_port.in_waiting)
             
             # 简单的握手解析器
-            # 5A A5 00 04 [HASH 4 bytes] [CRC]
+            # [HEAD1][HEAD2][ID_HANDSHAKE][LEN=4][HASH 4 bytes][CRC]
             if len(buf) >= 9: # 2+1+1+4+1 = 9
                 idx = buf.find(struct.pack('<BB', HEAD1, HEAD2))
                 if idx != -1 and len(buf) >= idx + 9:
@@ -228,6 +260,11 @@ class TestSerialController(unittest.TestCase):
         return False
 
     def test_communication(self):
+        self.assertIsNotNone(
+            PROTOCOL_CONFIG,
+            "Protocol configuration is not loaded."
+        )
+
         # 1. 执行握手
         self.assertTrue(self.wait_for_handshake(), "Handshake failed")
         
@@ -239,68 +276,79 @@ class TestSerialController(unittest.TestCase):
                 rx_msg = msg
             if msg.get('direction') in ['tx', 'both'] and not tx_msg:
                 tx_msg = msg
+
+        self.assertIsNotNone(
+            rx_msg,
+            "No message with direction 'rx' or 'both' found in protocol config."
+        )
+        self.assertIsNotNone(
+            tx_msg,
+            "No message with direction 'tx' or 'both' found in protocol config."
+        )
         
         # 2. 测试从串口接收 (Serial -> ROS)
-        if rx_msg:
-            received_msgs = []
-            ros_msg_class = get_ros_msg_class(rx_msg['ros_msg'])
-            
-            sub_hb = self.node.create_subscription(
-                ros_msg_class,
-                rx_msg['pub_topic'],
-                lambda msg: received_msgs.append(msg),
-                10
-            )
-            
-            payload = generate_dummy_payload(rx_msg)
-            packet = self.pack_packet(rx_msg['id'], payload)
-            
-            end_time = time.time() + 5.0
-            found = False
-            while time.time() < end_time:
-                self.serial_port.write(packet)
-                self.serial_port.flush()
-                
-                spin_end = time.time() + 0.5
-                while time.time() < spin_end:
-                     rclpy.spin_once(self.node, timeout_sec=0.1)
-                     if len(received_msgs) > 0:
-                         found = True
-                         break
-                if found: break
-            
-            self.assertTrue(found, f"Did not receive {rx_msg['name']} from ROS")
+        received_msgs = []
+        ros_msg_class = get_ros_msg_class(rx_msg['ros_msg'])
+
+        sub_hb = self.node.create_subscription(
+            ros_msg_class,
+            rx_msg['pub_topic'],
+            lambda msg: received_msgs.append(msg),
+            10
+        )
+
+        payload = generate_dummy_payload(rx_msg)
+        packet = self.pack_packet(rx_msg['id'], payload)
+
+        end_time = time.time() + 5.0
+        found = False
+        while time.time() < end_time:
+            self.serial_port.write(packet)
+            self.serial_port.flush()
+
+            spin_end = time.time() + 0.5
+            while time.time() < spin_end:
+                 rclpy.spin_once(self.node, timeout_sec=0.1)
+                 if len(received_msgs) > 0:
+                     found = True
+                     break
+            if found: break
+
+        self.assertTrue(found, f"Did not receive {rx_msg['name']} from ROS")
 
         # 3. 测试发送到串口 (ROS -> Serial)
-        if tx_msg:
-            ros_msg_class = get_ros_msg_class(tx_msg['ros_msg'])
-            pub = self.node.create_publisher(ros_msg_class, tx_msg['sub_topic'], 10)
-            msg_instance = ros_msg_class()
-            
-            self.serial_port.reset_input_buffer()
-            
-            for _ in range(10):
-                pub.publish(msg_instance)
-                time.sleep(0.1)
-                rclpy.spin_once(self.node, timeout_sec=0.1)
-                
-            start_time = time.time()
-            found_packet = False
-            buf = b''
-            while time.time() - start_time < 2.0:
-                if self.serial_port.in_waiting:
-                    buf += self.serial_port.read(self.serial_port.in_waiting)
-                
-                if len(buf) >= 6:
-                    idx = buf.find(struct.pack('<BB', HEAD1, HEAD2))
-                    if idx != -1 and len(buf) >= idx + 4:
-                        if buf[idx+2] == tx_msg['id']:
+        ros_msg_class = get_ros_msg_class(tx_msg['ros_msg'])
+        pub = self.node.create_publisher(ros_msg_class, tx_msg['sub_topic'], 10)
+        msg_instance = ros_msg_class()
+
+        self.serial_port.reset_input_buffer()
+
+        for _ in range(10):
+            pub.publish(msg_instance)
+            time.sleep(0.1)
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+
+        start_time = time.time()
+        found_packet = False
+        buf = b''
+        while time.time() - start_time < 2.0:
+            if self.serial_port.in_waiting:
+                buf += self.serial_port.read(self.serial_port.in_waiting)
+
+            idx = buf.find(struct.pack('<BB', HEAD1, HEAD2))
+            if idx != -1:
+                # Need at least header(2) + id(1) + len(1)
+                if len(buf) >= idx + 4:
+                    msg_id = buf[idx + 2]
+                    payload_len = buf[idx + 3]
+                    frame_len = 2 + 1 + 1 + payload_len + 1
+                    if len(buf) >= idx + frame_len:
+                        if msg_id == tx_msg['id']:
                             found_packet = True
                             break
-                        else:
-                            buf = buf[idx+1:]
-                    else:
-                        if idx == -1: buf = b''
-                time.sleep(0.05)
-                
-            self.assertTrue(found_packet, f"未在串口上收到 {tx_msg['name']} 数据")
+                        buf = buf[idx + 1:]
+            else:
+                buf = b''
+            time.sleep(0.05)
+
+        self.assertTrue(found_packet, f"未在串口上收到 {tx_msg['name']} 数据")
