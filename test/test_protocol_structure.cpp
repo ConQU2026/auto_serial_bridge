@@ -8,8 +8,8 @@ TEST(ProtocolStructureTest, StructPacking) {
     // Handshake: u32 (4 字节)
     EXPECT_EQ(sizeof(Packet_Handshake), 4);
     
-    // Heartbeat: u8 (1 字节)
-    EXPECT_EQ(sizeof(Packet_Heartbeat), 1);
+    // Heartbeat: u32 (4 字节)
+    EXPECT_EQ(sizeof(Packet_Heartbeat), 4);
 }
 
 TEST(ProtocolStructureTest, Constants) {

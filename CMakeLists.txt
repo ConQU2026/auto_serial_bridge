@@ -33,7 +33,18 @@ endforeach()
 # ==============================================================================
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+# Track protocol config files so CMake re-configures when protocol.yaml appears
+# or either file changes, preventing stale fallback selection.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/config/protocol.yaml"
+  "${CMAKE_CURRENT_SOURCE_DIR}/config/protocol-sample.yaml"
+)
+
 set(PROTOCOL_YAML "${CMAKE_CURRENT_SOURCE_DIR}/config/protocol.yaml")
+if(NOT EXISTS "${PROTOCOL_YAML}")
+  set(PROTOCOL_YAML "${CMAKE_CURRENT_SOURCE_DIR}/config/protocol-sample.yaml")
+  message(STATUS "Auto Serial Bridge: protocol.yaml not found, using protocol-sample.yaml for code generation.")
+endif()
 set(CODEGEN_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/codegen.py")
 set(MCU_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/mcu_output/protocol.h")
 set(MCU_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/mcu_output/protocol.c")
