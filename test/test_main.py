@@ -14,12 +14,10 @@ from launch_ros.descriptions import ComposableNode
 from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
-from std_msgs.msg import UInt32, UInt8
 import serial
 import struct
-
 import yaml
+from importlib import import_module
 
 # 动态加载协议配置
 def load_protocol_config():
@@ -28,7 +26,9 @@ def load_protocol_config():
         from ament_index_python.packages import get_package_share_directory
         share_dir = get_package_share_directory(package_name)
         config_path = os.path.join(share_dir, 'config', 'protocol.yaml')
-        
+        if not os.path.exists(config_path):
+            config_path = os.path.join(share_dir, 'config', 'protocol-sample.yaml')
+            
         with open(config_path, 'r') as f:
             content = f.read()
             config = yaml.safe_load(content)
@@ -52,14 +52,41 @@ def get_message_id(name):
                 return msg['id']
     return None
 
+def get_ros_msg_class(ros_msg_type_str):
+    parts = ros_msg_type_str.split('/')
+    if len(parts) >= 3:
+        module_name = f"{parts[0]}.{parts[1]}"
+        class_name = parts[2]
+        return getattr(import_module(module_name), class_name)
+    return None
+
+def get_struct_format_for_type(type_name):
+    formats = {
+        'uint8': 'B', 'uint8_t': 'B', 'u8': 'B',
+        'uint16': 'H', 'uint16_t': 'H', 'u16': 'H',
+        'uint32': 'I', 'uint32_t': 'I', 'u32': 'I',
+        'int8': 'b', 'int8_t': 'b', 'i8': 'b',
+        'int16': 'h', 'int16_t': 'h', 'i16': 'h',
+        'int32': 'i', 'int32_t': 'i', 'i32': 'i',
+        'float': 'f', 'float32': 'f', 'f32': 'f',
+        'double': 'd', 'float64': 'd', 'f64': 'd'
+    }
+    return formats.get(type_name, 'B')
+
+def generate_dummy_payload(msg_config):
+    fmt = '<'
+    values = []
+    for field in msg_config.get('fields', []):
+        fmt += get_struct_format_for_type(field['type'])
+        values.append(0)
+    return struct.pack(fmt, *values)
+
 # 协议常量 (动态获取)
 HEAD1 = get_config_value('head_byte_1', 0x5A)
 HEAD2 = get_config_value('head_byte_2', 0xA5)
 ID_HANDSHAKE = get_message_id('Handshake')
-ID_HEARTBEAT = get_message_id('Heartbeat')
 
 if ID_HANDSHAKE is None: ID_HANDSHAKE = 0x00
-if ID_HEARTBEAT is None: ID_HEARTBEAT = 0x01
 
 def get_protocol_hash():
     if PROTOCOL_YAML_CONTENT:
@@ -124,7 +151,7 @@ def generate_test_description():
         namespace='',
         package='rclcpp_components',
         executable='component_container',
-        arguments=['--ros-args', '--log-level', 'debug'],
+        arguments=["--ros-args", "--log-level", "info"],
         composable_node_descriptions=[serial_component],
         output='screen',
     )
@@ -183,9 +210,9 @@ class TestSerialController(unittest.TestCase):
             # 简单的握手解析器
             # 5A A5 00 04 [HASH 4 bytes] [CRC]
             if len(buf) >= 9: # 2+1+1+4+1 = 9
-                idx = buf.find(b'\x5A')
+                idx = buf.find(struct.pack('<BB', HEAD1, HEAD2))
                 if idx != -1 and len(buf) >= idx + 9:
-                    if buf[idx+1] == 0xA5 and buf[idx+2] == ID_HANDSHAKE:
+                    if buf[idx+2] == ID_HANDSHAKE:
                          # 发现握手请求
                          # 发送握手响应
                          hash_bytes = struct.pack('<I', PROTOCOL_HASH)
@@ -204,79 +231,76 @@ class TestSerialController(unittest.TestCase):
         # 1. 执行握手
         self.assertTrue(self.wait_for_handshake(), "Handshake failed")
         
+        # 找到一个 rx_msg 和 tx_msg
+        rx_msg = None
+        tx_msg = None
+        for msg in PROTOCOL_CONFIG.get('messages', []):
+            if msg.get('direction') in ['rx', 'both'] and not rx_msg:
+                rx_msg = msg
+            if msg.get('direction') in ['tx', 'both'] and not tx_msg:
+                tx_msg = msg
+        
         # 2. 测试从串口接收 (Serial -> ROS)
-        # MCU 发送心跳 (ID 1), ROS 发布 /serial/heartbeat
-        
-        received_msgs = []
-        sub_hb = self.node.create_subscription(
-            UInt8,
-            '/serial/heartbeat',
-            lambda msg: received_msgs.append(msg),
-            10
-        )
-        
-        hb_data = struct.pack('<B', 123)
-        packet = self.pack_packet(ID_HEARTBEAT, hb_data)
-        
-        # 重试循环以考虑到发现延迟
-        end_time = time.time() + 5.0
-        found = False
-        while time.time() < end_time:
-            self.serial_port.write(packet)
-            self.serial_port.flush()
+        if rx_msg:
+            received_msgs = []
+            ros_msg_class = get_ros_msg_class(rx_msg['ros_msg'])
             
-            # 短暂自旋以检查响应
-            spin_end = time.time() + 0.5
-            while time.time() < spin_end:
-                 rclpy.spin_once(self.node, timeout_sec=0.1)
-                 for msg in received_msgs:
-                     if msg.data == 123:
+            sub_hb = self.node.create_subscription(
+                ros_msg_class,
+                rx_msg['pub_topic'],
+                lambda msg: received_msgs.append(msg),
+                10
+            )
+            
+            payload = generate_dummy_payload(rx_msg)
+            packet = self.pack_packet(rx_msg['id'], payload)
+            
+            end_time = time.time() + 5.0
+            found = False
+            while time.time() < end_time:
+                self.serial_port.write(packet)
+                self.serial_port.flush()
+                
+                spin_end = time.time() + 0.5
+                while time.time() < spin_end:
+                     rclpy.spin_once(self.node, timeout_sec=0.1)
+                     if len(received_msgs) > 0:
                          found = True
                          break
-                 if found: break
-            if found: break
-        
-        self.assertTrue(found, "Did not receive Heartbeat from ROS")
+                if found: break
+            
+            self.assertTrue(found, f"Did not receive {rx_msg['name']} from ROS")
 
         # 3. 测试发送到串口 (ROS -> Serial)
-        # 协议定义 Heartbeat 为 'both' 方向。
-        # 发布到 /serial/heartbeat_cmd, 应该在串口通过 ID 0x01 收到
-        pub = self.node.create_publisher(UInt8, '/serial/heartbeat_cmd', 10)
-        msg = UInt8()
-        msg.data = 200
-        
-        # 清空串口缓冲区
-        self.serial_port.reset_input_buffer()
-        
-        for _ in range(10):
-            pub.publish(msg)
-            time.sleep(0.1)
-            rclpy.spin_once(self.node, timeout_sec=0.1)
+        if tx_msg:
+            ros_msg_class = get_ros_msg_class(tx_msg['ros_msg'])
+            pub = self.node.create_publisher(ros_msg_class, tx_msg['sub_topic'], 10)
+            msg_instance = ros_msg_class()
             
-        # 检查串口是否有 Heartbeat 数据包
-        start_time = time.time()
-        found_packet = False
-        buf = b''
-        while time.time() - start_time < 2.0:
-            if self.serial_port.in_waiting:
-                buf += self.serial_port.read(self.serial_port.in_waiting)
+            self.serial_port.reset_input_buffer()
             
-            # 搜索 ID_HEARTBEAT (0x01)
-            # Head(2)+ID(1)+Len(1)+Data(1)+CRC(1) = 6 字节
-            if len(buf) >= 6:
-                 idx = buf.find(b'\x5A')
-                 if idx != -1 and len(buf) >= idx+6:
-                     if buf[idx+1] == 0xA5 and buf[idx+2] == ID_HEARTBEAT:
-                         # Check data (1 byte)
-                         data_byte = buf[idx+4]
-                         if data_byte == 200:
-                             found_packet = True
-                             break
-                     else:
-                          # 丢弃 1 字节
-                         buf = buf[idx+1:]
-                 else:
-                     if idx == -1: buf = b''
-            time.sleep(0.05)
-            
-        self.assertTrue(found_packet, "未在串口上收到 /serial/heartbeat_cmd 的 Heartbeat 数据")
+            for _ in range(10):
+                pub.publish(msg_instance)
+                time.sleep(0.1)
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+                
+            start_time = time.time()
+            found_packet = False
+            buf = b''
+            while time.time() - start_time < 2.0:
+                if self.serial_port.in_waiting:
+                    buf += self.serial_port.read(self.serial_port.in_waiting)
+                
+                if len(buf) >= 6:
+                    idx = buf.find(struct.pack('<BB', HEAD1, HEAD2))
+                    if idx != -1 and len(buf) >= idx + 4:
+                        if buf[idx+2] == tx_msg['id']:
+                            found_packet = True
+                            break
+                        else:
+                            buf = buf[idx+1:]
+                    else:
+                        if idx == -1: buf = b''
+                time.sleep(0.05)
+                
+            self.assertTrue(found_packet, f"未在串口上收到 {tx_msg['name']} 数据")
