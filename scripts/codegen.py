@@ -57,23 +57,23 @@ def extract_user_code(file_path):
     
     Args:
         file_path: Path to the existing file.
-        
+
     Returns:
         A dictionary mapping block keys to their content (list of lines).
     """
     blocks = {}
     if not os.path.exists(file_path):
         return blocks
-        
+
     with open(file_path, 'r', encoding='utf-8') as f:
         content = f.read()
-        
+
     pattern = re.compile(r'/\* USER CODE BEGIN (\w+) \*/(.*?)/\* USER CODE END \1 \*/', re.DOTALL)
     matches = pattern.findall(content)
     
     for key, code in matches:
         blocks[key] = code
-        
+
     return blocks
 
 def render_block(blocks, key):
@@ -82,7 +82,7 @@ def render_block(blocks, key):
     Args:
         blocks: Dictionary of extracted blocks.
         key: The key for the block.
-        
+
     Returns:
         Formatted string containing the user code block.
     """
@@ -101,17 +101,29 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
         user_blocks: Extracted user code blocks.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
+
     with open(output_path, 'w') as f:
         f.write("#pragma once\n")
         f.write("#include <stdint.h>\n")
         f.write("\n")
         f.write(render_block(user_blocks, "Includes"))
         f.write("\n")
-        
+
+        checksum_algo = config.get('checksum', 'CRC8').upper()
+        require_handshake = config.get('require_handshake', True)
+
         f.write("// 协议哈希校验码\n")
         f.write(f"#define PROTOCOL_HASH 0x{protocol_hash:08X}\n")
         f.write("\n")
+
+        f.write(f"// 校验算法: {checksum_algo}\n")
+        f.write(f"#define CHECKSUM_ALGO_{checksum_algo} 1\n")
+        f.write("\n")
+
+        f.write(f"// 握手配置\n")
+        f.write(f"#define CFG_REQUIRE_HANDSHAKE {1 if require_handshake else 0}\n")
+        f.write("\n")
+
         f.write(render_block(user_blocks, "Private_Defines"))
         f.write("\n")
 
@@ -141,54 +153,82 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
         f.write(render_block(user_blocks, "User_Types"))
         f.write("\n")
         
-        # 生成CRC8表
-        table = generate_crc8_table()
-        f.write("// CRC8查找表\n")
-        f.write("static const uint8_t CRC8_TABLE[256] = {\n")
-        for i in range(0, 256, 16):
-            line = ", ".join(f"0x{x:02X}" for x in table[i:i+16])
-            f.write(f"    {line},\n")
-        f.write("};\n")
+        if checksum_algo == "CRC8":
+            table = generate_crc8_table()
+            f.write("// CRC8查找表 (多项式 0x31)\n")
+            f.write("static const uint8_t CRC8_TABLE[256] = {\n")
+            for i in range(0, 256, 16):
+                line = ", ".join(f"0x{x:02X}" for x in table[i:i+16])
+                f.write(f"    {line},\n")
+            f.write("};\n")
 
 def generate_mcu_source(config, messages, output_path, user_blocks):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     buffer_size = config.get('buffer_size', 256)
-    
+    checksum_algo = config.get('checksum', 'CRC8').upper()
+
     with open(output_path, 'w') as f:
         f.write("#include \"protocol.h\"\n")
         f.write("#include <string.h>\n\n")
         f.write(render_block(user_blocks, "Includes"))
         f.write("\n")
         
-        # --- 1. 定义解析器状态机 ---
-        c_code_template = """
+        # --- 1. 定义解析器状态机 + 校验函数 ---
+        f.write(f"""
 // 解析器状态定义
-typedef enum {
+typedef enum {{
     STATE_WAIT_HEADER1,
     STATE_WAIT_HEADER2,
     STATE_WAIT_ID,
     STATE_WAIT_LEN,
     STATE_WAIT_DATA,
     STATE_WAIT_CRC
-} State;
+}} State;
 
 static State rx_state = STATE_WAIT_HEADER1;
 static uint8_t rx_buffer[{buffer_size}]; // 定义的最大包长
 static uint16_t rx_cnt = 0;
 static uint8_t rx_data_len = 0;
 static uint8_t rx_id = 0;
-static uint8_t rx_crc = 0;
+static uint8_t rx_checksum = 0;
 
-// CRC8 计算函数 (查表法)
-uint8_t calculate_crc8(const uint8_t* data, uint8_t len, uint8_t initial_crc) {
-    uint8_t crc = initial_crc;
-    for (uint8_t i = 0; i < len; i++) {
-        crc = CRC8_TABLE[crc ^ data[i]];
-    }
-    return crc;
+""")
+        # 根据算法生成校验函数
+        if checksum_algo == "CRC8":
+            f.write("""// CRC8 校验函数 (查表法, 多项式 0x31)
+static uint8_t checksum_update(uint8_t current, uint8_t byte) {
+    return CRC8_TABLE[current ^ byte];
 }
-"""
-        f.write(c_code_template.replace("{buffer_size}", str(buffer_size)))
+""")
+        elif checksum_algo == "SUM8":
+            f.write("""// SUM8 校验函数 (累加和)
+static uint8_t checksum_update(uint8_t current, uint8_t byte) {
+    return (uint8_t)(current + byte);
+}
+""")
+        elif checksum_algo == "XOR8":
+            f.write("""// XOR8 校验函数 (异或)
+static uint8_t checksum_update(uint8_t current, uint8_t byte) {
+    return current ^ byte;
+}
+""")
+        else:  # NONE
+            f.write("""// 无校验
+static uint8_t checksum_update(uint8_t current, uint8_t byte) {
+    (void)current; (void)byte;
+    return 0;
+}
+""")
+
+        f.write("""
+uint8_t calculate_checksum(const uint8_t* data, uint8_t len) {
+    uint8_t cs = 0;
+    for (uint8_t i = 0; i < len; i++) {
+        cs = checksum_update(cs, data[i]);
+    }
+    return cs;
+}
+""")
         
         f.write("\n")
         f.write(render_block(user_blocks, "Private_Variables"))
@@ -209,57 +249,67 @@ uint8_t calculate_crc8(const uint8_t* data, uint8_t len, uint8_t initial_crc) {
         f.write("\n")
         
         # --- 3. 核心状态机函数 ---
-        f.write("""
+        # NONE 算法时跳过校验比较
+        if checksum_algo == "NONE":
+            crc_check_expr = "1"
+        else:
+            crc_check_expr = "byte == rx_checksum"
+
+        f.write(f"""
 /**
  * @brief 协议解析状态机，在串口中断或轮询中调用此函数处理每个接收到的字节
  * @param byte 接收到的单个字节
  */
-void protocol_fsm_feed(uint8_t byte) {
-    switch (rx_state) {
+void protocol_fsm_feed(uint8_t byte) {{
+    switch (rx_state) {{
         case STATE_WAIT_HEADER1:
-            if (byte == FRAME_HEADER1) {
+            if (byte == FRAME_HEADER1) {{
                 rx_state = STATE_WAIT_HEADER2;
-                rx_crc = 0; // CRC 重置，校验不包含 Frame Header
-            }
+                rx_checksum = 0; // 校验重置，不包含 Frame Header
+            }}
             break;
             
         case STATE_WAIT_HEADER2:
-            if (byte == FRAME_HEADER2) {
+            if (byte == FRAME_HEADER2) {{
                 rx_state = STATE_WAIT_ID;
-            } else {
-                rx_state = STATE_WAIT_HEADER1; // 重置
-            }
+            }} else {{
+                rx_state = STATE_WAIT_HEADER1;
+            }}
             break;
             
         case STATE_WAIT_ID:
             rx_id = byte;
-            rx_crc = CRC8_TABLE[0 ^ rx_id]; // 开始计算 CRC，校验包含 ID
+            rx_checksum = checksum_update(0, rx_id); // 校验包含 ID
             rx_state = STATE_WAIT_LEN;
             break;
             
         case STATE_WAIT_LEN:
             rx_data_len = byte;
-            rx_crc = CRC8_TABLE[rx_crc ^ rx_data_len]; // CRC 计算，校验包含 Len
+            rx_checksum = checksum_update(rx_checksum, rx_data_len); // 校验包含 Len
             rx_cnt = 0;
-            if (rx_data_len > 0) {
+            if (rx_data_len > 0) {{
                 rx_state = STATE_WAIT_DATA;
-            } else {
-                rx_state = STATE_WAIT_CRC; // 数据长度为0的情况
-            }
+            }} else {{
+                rx_state = STATE_WAIT_CRC;
+            }}
             break;
             
         case STATE_WAIT_DATA:
-            rx_buffer[rx_cnt++] = byte;
-            rx_crc = CRC8_TABLE[rx_crc ^ byte]; // CRC 计算，校验包含 Data
-            if (rx_cnt >= rx_data_len) {
-                rx_state = STATE_WAIT_CRC;
-            }
+            if (rx_cnt < sizeof(rx_buffer)) {{
+                rx_buffer[rx_cnt++] = byte;
+                rx_checksum = checksum_update(rx_checksum, byte);
+                if (rx_cnt >= rx_data_len) {{
+                    rx_state = STATE_WAIT_CRC;
+                }}
+            }} else {{
+                rx_state = STATE_WAIT_HEADER1;
+            }}
             break;
             
         case STATE_WAIT_CRC:
-            if (byte == rx_crc) {
+            if ({crc_check_expr}) {{
                 // 校验通过，分发数据
-                switch (rx_id) {
+                switch (rx_id) {{
 """)
         # --- 4. 自动生成分发逻辑 ---
         for msg in messages:
@@ -276,7 +326,6 @@ void protocol_fsm_feed(uint8_t byte) {
                         break;
                 }
             }
-            // 无论校验成功与否，都重置状态
             rx_state = STATE_WAIT_HEADER1;
             break;
             
@@ -293,32 +342,21 @@ void protocol_fsm_feed(uint8_t byte) {
         f.write("extern void serial_write(const uint8_t* data, uint16_t len);\n\n")
         
         for msg in messages:
-                # MCU 发送方向 (MCU -> ROS)
                 f.write(f"void send_{msg['name']}(const Packet_{msg['name']}* pkt) {{\n")
-                f.write(f"    // Header(4) + Data(sizeof) + CRC(1)\n")
                 f.write(f"    uint8_t buffer[4 + sizeof(Packet_{msg['name']}) + 1];\n")
                 f.write(f"    uint16_t idx = 0;\n")
                 f.write(f"    \n")
-                f.write(f"    // 1. Prepare Header\n")
                 f.write(f"    buffer[idx++] = FRAME_HEADER1;\n")
                 f.write(f"    buffer[idx++] = FRAME_HEADER2;\n")
                 f.write(f"    buffer[idx++] = PACKET_ID_{msg['name'].upper()};\n")
                 f.write(f"    buffer[idx++] = sizeof(Packet_{msg['name']});\n")
                 f.write(f"    \n")
-                f.write(f"    // 2. Copy Data\n")
                 f.write(f"    memcpy(&buffer[idx], pkt, sizeof(Packet_{msg['name']}));\n")
                 f.write(f"    idx += sizeof(Packet_{msg['name']});\n")
                 f.write(f"    \n")
-                f.write(f"    // 3. Calculate CRC (ID + Len + Data)\n")
-                f.write(f"    // ID is at buffer[2]\n")
-                f.write(f"    // Count = 1(ID) + 1(Len) + sizeof(Data)\n")
-                f.write(f"    uint8_t crc = 0;\n")
-                f.write(f"    for(uint16_t i = 2; i < idx; i++) {{\n")
-                f.write(f"        crc = CRC8_TABLE[crc ^ buffer[i]];\n")
-                f.write(f"    }}\n")
-                f.write(f"    buffer[idx++] = crc;\n")
+                f.write(f"    buffer[idx] = calculate_checksum(&buffer[2], idx - 2);\n")
+                f.write(f"    idx++;\n")
                 f.write(f"    \n")
-                f.write(f"    // 4. Send Buffer\n")
                 f.write(f"    serial_write(buffer, idx);\n")
                 f.write(f"}}\n")
                 
@@ -336,7 +374,50 @@ void protocol_fsm_feed(uint8_t byte) {
         f.write("}\n*/\n")
         f.write("\n")
 
-def generate_ros_bindings(messages, type_mappings, output_path):
+_ROS_FIELD_SEGMENT_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)(?:\[(\d+)\])?$')
+
+
+def _merge_vector_requirements(dest, updates):
+    for expr, required_size in updates.items():
+        dest[expr] = max(dest.get(expr, 0), required_size)
+
+
+def _vector_label(expr: str) -> str:
+    if expr.startswith('msg->'):
+        return expr[5:]
+    if expr.startswith('msg.'):
+        return expr[4:]
+    return expr
+
+
+def _analyze_ros_path(path: str, root_var: str, pointer: bool):
+    current_expr = root_var
+    access_expr = root_var
+    vector_requirements = {}
+
+    for index, segment in enumerate(path.split('.')):
+        match = _ROS_FIELD_SEGMENT_RE.fullmatch(segment)
+        if not match:
+            raise ValueError(f"Unsupported ROS field path segment: {segment!r} in {path!r}")
+
+        name, array_index = match.groups()
+        separator = '->' if pointer and index == 0 else '.'
+        base_expr = f"{current_expr}{separator}{name}"
+        if array_index is not None:
+            access_expr = f"{base_expr}[{array_index}]"
+            vector_requirements[base_expr] = max(
+                vector_requirements.get(base_expr, 0),
+                int(array_index) + 1,
+            )
+        else:
+            access_expr = base_expr
+
+        current_expr = access_expr
+
+    return access_expr, vector_requirements
+
+
+def generate_ros_bindings(messages, type_mappings, config, output_path):
     """生成ROS端使用的C++绑定代码。
 
     包含自动订阅和发布逻辑。
@@ -344,33 +425,28 @@ def generate_ros_bindings(messages, type_mappings, output_path):
     Args:
         messages: 消息定义列表。
         type_mappings: 类型映射字典。
+        config: 全局配置字典。
         output_path: 输出文件路径。
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    qos_depth = config.get('qos_depth', 10)
     
     includes = set()
     for msg in messages:
         includes.add(msg['ros_msg'])
-    
+
     with open(output_path, 'w') as f:
         f.write("#pragma once\n")
         f.write("#include <functional>\n")
         f.write("#include \"auto_serial_bridge/serial_controller.hpp\"\n")
         for inc in includes:
-             # inc 例如 "geometry_msgs/msg/Twist"
              parts = inc.split('/')
-             pkg = parts[0]
-             sub = parts[1] # msg
-             typ = parts[2] # Twist
-             
-             import re
-             # 驼峰转蛇形命名
+             pkg, sub, typ = parts[0], parts[1], parts[2]
              s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', typ)
              snake_typ = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
-             
              f.write(f"#include <{pkg}/{sub}/{snake_typ}.hpp>\n")
         
-        f.write("#include \"../../mcu_output/protocol.h\"\n") # 包含生成的MCU结构体定义
+        f.write("#include \"protocol.h\"\n")
         f.write("\n")
         
         f.write("namespace auto_serial_bridge {\n")
@@ -391,17 +467,39 @@ def generate_ros_bindings(messages, type_mappings, output_path):
                 
                 parts = msg['ros_msg'].split('/')
                 ros_type_cpp = f"{parts[0]}::{parts[1]}::{parts[2]}" 
+                mirrored_topic = msg['direction'] == 'both' and msg.get('pub_topic') == topic
                 
                 f.write(f"    // {msg['name']} (ROS -> MCU)\n")
                 f.write(f"    node->add_subscription(node->create_subscription<{ros_type_cpp}>(\n")
-                f.write(f"        \"{topic}\", 10,\n")
-                f.write(f"        [node](const {ros_type_cpp}::SharedPtr msg) {{\n")
-                f.write(f"            Packet_{msg['name']} pkt;\n")
-                # Assignment logic
+                f.write(f"        \"{topic}\", {qos_depth},\n")
+                if mirrored_topic:
+                    f.write(f"        [node](const {ros_type_cpp}::SharedPtr msg, const rclcpp::MessageInfo& msg_info) {{\n")
+                    f.write(f"            if (node->should_skip_loopback(PACKET_ID_{msg['name'].upper()}, msg_info)) {{\n")
+                    f.write("                return;\n")
+                    f.write("            }\n")
+                else:
+                    f.write(f"        [node](const {ros_type_cpp}::SharedPtr msg) {{\n")
+
+                vector_requirements = {}
+                field_reads = []
                 for field in msg['fields']:
-                    # field['ros'] 例如 "linear.x" -> msg->linear.x
-                    ros_acc = field['ros'].replace('.', '.') 
-                    f.write(f"            pkt.{field['proto']} = msg->{ros_acc};\n")
+                    read_expr, requirements = _analyze_ros_path(field['ros'], 'msg', True)
+                    _merge_vector_requirements(vector_requirements, requirements)
+                    field_reads.append((field, read_expr))
+
+                for expr, required_size in sorted(vector_requirements.items()):
+                    label = _vector_label(expr)
+                    f.write(f"            if ({expr}.size() < {required_size}) {{\n")
+                    f.write("                RCLCPP_ERROR_THROTTLE(\n")
+                    f.write("                    node->get_logger(), *node->get_clock(), 2000,\n")
+                    f.write(f"                    \"Message for {msg['name']} on {topic} requires at least {required_size} entries in {label}, got %zu\",\n")
+                    f.write(f"                    {expr}.size());\n")
+                    f.write("                return;\n")
+                    f.write("            }\n")
+
+                f.write(f"            Packet_{msg['name']} pkt;\n")
+                for field, read_expr in field_reads:
+                    f.write(f"            pkt.{field['proto']} = {read_expr};\n")
                 
                 f.write(f"            node->send_packet(PACKET_ID_{msg['name'].upper()}, pkt);\n")
                 f.write(f"        }}));\n")
@@ -423,7 +521,7 @@ def generate_ros_bindings(messages, type_mappings, output_path):
                 ros_type_cpp = f"{parts[0]}::{parts[1]}::{parts[2]}"
                 f.write(f"    rclcpp::Publisher<{ros_type_cpp}>::SharedPtr pub_{msg['name']};\n")
         
-        f.write("\n    void init(rclcpp::Node* node) {\n")
+        f.write("\n    void init(SerialController* node) {\n")
         for msg in messages:
             if msg['direction'] == 'rx' or msg['direction'] == 'both':
                 parts = msg['ros_msg'].split('/')
@@ -431,7 +529,9 @@ def generate_ros_bindings(messages, type_mappings, output_path):
                 topic = msg.get('pub_topic')
                 if not topic:
                     raise ValueError(f"Message {msg['name']} missing 'pub_topic'")
-                f.write(f"        pub_{msg['name']} = node->create_publisher<{ros_type_cpp}>(\"{topic}\", 10);\n")
+                f.write(f"        pub_{msg['name']} = node->create_publisher<{ros_type_cpp}>(\"{topic}\", {qos_depth});\n")
+                if msg['direction'] == 'both' and msg.get('sub_topic') == topic:
+                    f.write(f"        node->register_loopback_publisher(PACKET_ID_{msg['name'].upper()}, pub_{msg['name']});\n")
         f.write("    }\n")
         f.write("};\n\n")
 
@@ -447,11 +547,16 @@ def generate_ros_bindings(messages, type_mappings, output_path):
                 parts = msg['ros_msg'].split('/')
                 ros_type_cpp = f"{parts[0]}::{parts[1]}::{parts[2]}"
                 f.write(f"            auto msg = {ros_type_cpp}();\n")
+                vector_requirements = {}
+                field_writes = []
                 for field in msg['fields']:
-                     # 映射关系: ros = proto
-                     # 例如: msg.data = pkt->count
-                     ros_acc = field['ros']
-                     f.write(f"            msg.{ros_acc} = pkt->{field['proto']};\n")
+                     write_expr, requirements = _analyze_ros_path(field['ros'], 'msg', False)
+                     _merge_vector_requirements(vector_requirements, requirements)
+                     field_writes.append((field, write_expr))
+                for expr, required_size in sorted(vector_requirements.items()):
+                     f.write(f"            {expr}.resize({required_size});\n")
+                for field, write_expr in field_writes:
+                     f.write(f"            {write_expr} = pkt->{field['proto']};\n")
                 
                 f.write(f"            if (pubs.pub_{msg['name']}) {{\n")
                 f.write(f"                pubs.pub_{msg['name']}->publish(msg);\n")
@@ -467,21 +572,32 @@ def generate_ros_bindings(messages, type_mappings, output_path):
 def generate_cpp_config(config, output_path):
     """生成C++公共配置头文件。"""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
+
+    checksum_algo = config.get('checksum', 'CRC8').upper()
+    require_handshake = config.get('require_handshake', True)
+    qos_depth = config.get('qos_depth', 10)
+    heartbeat_timeout_ms = config.get('heartbeat_timeout_ms', 3000)
+
     with open(output_path, 'w') as f:
-        f.write("#pragma once\n\n")
+        f.write("#pragma once\n")
+        f.write("#include <cstdint>\n")
+        f.write("#include <cstddef>\n\n")
         f.write("namespace auto_serial_bridge {\n")
         f.write("namespace config {\n\n")
-        
+
         f.write(f"    constexpr uint32_t DEFAULT_BAUDRATE = {config['baudrate']};\n")
         f.write(f"    constexpr size_t BUFFER_SIZE = {config['buffer_size']};\n")
         f.write(f"    constexpr uint8_t CFG_FRAME_HEADER1 = {config['head_byte_1']};\n")
-        f.write(f"    constexpr uint8_t CFG_FRAME_HEADER2 = {config['head_byte_2']};\n")
-        
-        # 转换校验算法配置字符串
-        checksum_algo = config.get('checksum', 'CRC8')
-        f.write(f"    // Checksum Algorithm: {checksum_algo}\n")
-        
+        f.write(f"    constexpr uint8_t CFG_FRAME_HEADER2 = {config['head_byte_2']};\n\n")
+
+        # TODO: 扩展支持 CRC16/CRC32 (需修改帧格式，校验字段从 1 字节增加到 2/4 字节)
+        f.write("    enum class ChecksumAlgo { NONE, SUM8, XOR8, CRC8 };\n")
+        f.write(f"    constexpr ChecksumAlgo CHECKSUM_ALGO = ChecksumAlgo::{checksum_algo};\n\n")
+
+        f.write(f"    constexpr bool REQUIRE_HANDSHAKE = {'true' if require_handshake else 'false'};\n")
+        f.write(f"    constexpr size_t QOS_DEPTH = {qos_depth};\n")
+        f.write(f"    constexpr int HEARTBEAT_TIMEOUT_MS = {heartbeat_timeout_ms};\n")
+
         f.write("\n}\n")
         f.write("}\n")
 
@@ -496,16 +612,23 @@ _C_TYPE_SIZES = {
 }
 
 
-def _field_table(fields: list, type_mappings: dict) -> str:
+def _field_table(fields: list, type_mappings: dict, checksum_algo: str = "CRC8") -> str:
     """渲染字段信息为 Markdown 表格字符串。
 
     Args:
         fields: 协议字段定义列表。
         type_mappings: YAML 类型到 C 类型的映射。
+        checksum_algo: 校验算法名称。
 
     Returns:
         Markdown 表格字符串，包含字节偏移、字段名、类型、字节数列。
     """
+    _CHECKSUM_LABELS = {
+        "NONE": "无校验 (占位)",
+        "SUM8": "SUM8",
+        "XOR8": "XOR8",
+        "CRC8": "CRC8",
+    }
     lines = [
         "| 字节偏移 | 字段名 | C 类型 | 字节数 |",
         "| :------: | :----- | :----- | :----: |",
@@ -516,7 +639,8 @@ def _field_table(fields: list, type_mappings: dict) -> str:
         size = _C_TYPE_SIZES.get(c_type, 1)
         lines.append(f"| {offset} | `{field['proto']}` | `{c_type}` | {size} |")
         offset += size
-    lines.append(f"| **{offset}** | *(CRC8)* | `uint8_t` | 1 |")
+    label = _CHECKSUM_LABELS.get(checksum_algo, checksum_algo)
+    lines.append(f"| **{offset}** | *({label})* | `uint8_t` | 1 |")
     return "\n".join(lines)
 
 
@@ -538,7 +662,15 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
     head1 = config['head_byte_1']
     head2 = config['head_byte_2']
     baudrate = config.get('baudrate', 115200)
-    checksum = config.get('checksum', 'CRC8')
+    checksum = config.get('checksum', 'CRC8').upper()
+    require_handshake = config.get('require_handshake', True)
+
+    _CHECKSUM_DESC = {
+        "NONE": "无校验（占位字节 `0x00`）",
+        "SUM8": "SUM8 累加和，覆盖 ID + Len + Data",
+        "XOR8": "XOR8 异或，覆盖 ID + Len + Data",
+        "CRC8": "CRC8，覆盖 ID + Len + Data，多项式 `0x31`",
+    }
 
     # 按方向分组
     rx_msgs  = [m for m in messages if m['direction'] in ('rx', 'both')]   # MCU → ROS
@@ -558,6 +690,7 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
         f.write(f"| 帧头字节 1 | `{head1:#04x}` |\n")
         f.write(f"| 帧头字节 2 | `{head2:#04x}` |\n")
         f.write(f"| 校验算法 | `{checksum}` |\n")
+        f.write(f"| 强制握手 | `{'是' if require_handshake else '否'}` |\n")
         f.write(f"| 协议哈希（握手用）| `0x{protocol_hash:08X}` |\n")
         f.write("\n---\n\n")
 
@@ -571,7 +704,8 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
         f.write("| 2 | ID | 消息 ID，见下表 |\n")
         f.write("| 3 | Len | 数据段字节数 |\n")
         f.write("| 4 … 4+Len-1 | Data | 各字段按结构体内存布局排列 |\n")
-        f.write("| 4+Len | CRC8 | 覆盖 ID + Len + Data，多项式 `0x31` |\n")
+        checksum_desc = _CHECKSUM_DESC.get(checksum, checksum)
+        f.write(f"| 4+Len | Checksum | {checksum_desc} |\n")
         f.write("\n---\n\n")
 
         # ── 电控需要发送给 ROS（MCU → ROS） ──
@@ -589,7 +723,7 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
                 if msg.get('notes'):
                     f.write(f"- **注意事项**：{msg['notes']}\n")
                 f.write("\n")
-                f.write(_field_table(msg['fields'], type_mappings))
+                f.write(_field_table(msg['fields'], type_mappings, checksum))
                 f.write("\n\n")
         else:
             f.write("_无_\n\n")
@@ -611,13 +745,74 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
                 if msg.get('notes'):
                     f.write(f"- **注意事项**：{msg['notes']}\n")
                 f.write("\n")
-                f.write(_field_table(msg['fields'], type_mappings))
+                f.write(_field_table(msg['fields'], type_mappings, checksum))
                 f.write("\n\n")
         else:
             f.write("_无_\n\n")
 
         f.write("---\n\n")
         f.write("*文档由构建系统自动生成，版本以协议哈希为准。*\n")
+
+def validate_protocol(config_data):
+    """验证协议配置的完整性和合法性。"""
+    cfg = config_data.get('config', {})
+    messages = config_data.get('messages', [])
+    type_mappings = config_data.get('type_mappings', {})
+    errors = []
+
+    SUPPORTED_CHECKSUMS = {"NONE", "SUM8", "XOR8", "CRC8"}
+    checksum_algo = cfg.get('checksum', 'CRC8').upper()
+    if checksum_algo not in SUPPORTED_CHECKSUMS:
+        errors.append(f"Unsupported checksum '{cfg.get('checksum')}'. Supported: {', '.join(sorted(SUPPORTED_CHECKSUMS))}")
+    cfg['checksum'] = checksum_algo
+
+    if 'head_byte_1' not in cfg or 'head_byte_2' not in cfg:
+        errors.append("Protocol must define 'head_byte_1' and 'head_byte_2'.")
+
+    VALID_DIRECTIONS = {"tx", "rx", "both"}
+    seen_ids = {}
+    seen_names = set()
+
+    for i, msg in enumerate(messages):
+        label = msg.get('name', f'messages[{i}]')
+
+        for required in ('name', 'id', 'direction', 'ros_msg', 'fields'):
+            if required not in msg:
+                errors.append(f"Message '{label}' missing required field '{required}'.")
+
+        if msg.get('direction') not in VALID_DIRECTIONS:
+            errors.append(f"Message '{label}' has invalid direction '{msg.get('direction')}'. Must be one of: {', '.join(sorted(VALID_DIRECTIONS))}")
+
+        mid = msg.get('id')
+        if mid is not None:
+            if mid in seen_ids:
+                errors.append(f"Message '{label}' has duplicate ID {mid:#04x} (conflicts with '{seen_ids[mid]}').")
+            else:
+                seen_ids[mid] = label
+
+        name = msg.get('name')
+        if name:
+            if name in seen_names:
+                errors.append(f"Duplicate message name '{name}'.")
+            seen_names.add(name)
+
+        direction = msg.get('direction', '')
+        if direction in ('tx', 'both') and 'sub_topic' not in msg:
+            errors.append(f"Message '{label}' (direction={direction}) missing 'sub_topic'.")
+        if direction in ('rx', 'both') and 'pub_topic' not in msg:
+            errors.append(f"Message '{label}' (direction={direction}) missing 'pub_topic'.")
+
+        for field in msg.get('fields', []):
+            ftype = field.get('type', '')
+            if ftype not in type_mappings and ftype not in type_mappings.values():
+                errors.append(f"Message '{label}', field '{field.get('proto', '?')}': unknown type '{ftype}'.")
+
+    if errors:
+        print("Protocol validation failed:")
+        for e in errors:
+            print(f"  - {e}")
+        sys.exit(1)
+
 
 def main():
     if len(sys.argv) < 3:
@@ -630,28 +825,17 @@ def main():
     with open(yaml_file, 'r') as f:
         content = f.read()
         config_data = yaml.safe_load(content)
-        
-    # --- 验证配置 ---
-    cfg = config_data.get('config', {})
-    if cfg.get('checksum', 'CRC8') != 'CRC8':
-        print(f"Error: Unsupported checksum algorithm '{cfg.get('checksum')}'. Only 'CRC8' is supported currently.")
-        sys.exit(1)
-        
-    if 'head_byte_1' not in cfg or 'head_byte_2' not in cfg:
-        print("Error: Protocol must define 'head_byte_1' and 'head_byte_2'.")
-        sys.exit(1)
-    # ----------------
+
+    validate_protocol(config_data)
         
     phash = calculate_protocol_hash(content)
     
-    # --- Read existing user code for header ---
     mcu_header_path = os.path.join(output_dir, 'mcu_output', 'protocol.h')
     header_user_blocks = extract_user_code(mcu_header_path)
     
     generate_mcu_header(config_data['config'], config_data['messages'], config_data['type_mappings'], phash, 
                         mcu_header_path, header_user_blocks)
     
-    # --- Read existing user code for source ---
     mcu_source_path = os.path.join(output_dir, 'mcu_output', 'protocol.c')
     source_user_blocks = extract_user_code(mcu_source_path)
     
@@ -661,7 +845,8 @@ def main():
     generate_cpp_config(config_data['config'],
                         os.path.join(output_dir, 'include', 'auto_serial_bridge', 'generated_config.hpp'))
                         
-    generate_ros_bindings(config_data['messages'], config_data['type_mappings'], 
+    generate_ros_bindings(config_data['messages'], config_data['type_mappings'],
+                          config_data['config'],
                           os.path.join(output_dir, 'include', 'auto_serial_bridge', 'generated_bindings.hpp'))
 
     generate_mcu_doc(config_data['config'], config_data['messages'], config_data['type_mappings'],

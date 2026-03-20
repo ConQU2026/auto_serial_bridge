@@ -71,7 +71,12 @@ TEST_F(EdgeCaseTest, MaxLengthPayload) {
     uint8_t len = 255;
     std::vector<uint8_t> data(255, 0xAB);
     
-    std::vector<uint8_t> pkt = {FRAME_HEADER1, FRAME_HEADER2, test_id, len};
+    std::vector<uint8_t> pkt;
+    pkt.reserve(5 + data.size());
+    pkt.push_back(FRAME_HEADER1);
+    pkt.push_back(FRAME_HEADER2);
+    pkt.push_back(test_id);
+    pkt.push_back(len);
     pkt.insert(pkt.end(), data.begin(), data.end());
     
     uint8_t crc = 0;

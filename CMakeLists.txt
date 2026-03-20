@@ -15,10 +15,7 @@ endif()
 set(dependencies
   ament_cmake
   rclcpp
-  rclcpp_action
   std_msgs
-  nav_msgs
-  sensor_msgs
   rclcpp_components
   serial_driver
   geometry_msgs
@@ -42,8 +39,9 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 
 set(PROTOCOL_YAML "${CMAKE_CURRENT_SOURCE_DIR}/config/protocol.yaml")
 if(NOT EXISTS "${PROTOCOL_YAML}")
-  set(PROTOCOL_YAML "${CMAKE_CURRENT_SOURCE_DIR}/config/protocol-sample.yaml")
-  message(STATUS "Auto Serial Bridge: protocol.yaml not found, using protocol-sample.yaml for code generation.")
+  message(FATAL_ERROR
+    "Auto Serial Bridge requires config/protocol.yaml for code generation. "
+    "Copy config/protocol-sample.yaml to config/protocol.yaml or let CI create it explicitly before build.")
 endif()
 set(CODEGEN_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/codegen.py")
 set(MCU_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/mcu_output/protocol.h")

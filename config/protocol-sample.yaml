@@ -11,7 +11,10 @@ config:
   buffer_size: 256
   head_byte_1: 0x5A      # 双帧头 1
   head_byte_2: 0xA5      # 双帧头 2
-  checksum: "CRC8"       # 校验算法
+  checksum: "CRC8"              # 校验算法, 可选: NONE, SUM8, XOR8, CRC8
+  require_handshake: true       # false = 跳过握手, 上电直接进入 RUNNING
+  qos_depth: 10                 # ROS2 订阅/发布 QoS 队列深度
+  heartbeat_timeout_ms: 3000    # 心跳超时毫秒数 (0 = 不检测)
 
 # 2. 类型映射
 type_mappings:
