@@ -52,25 +52,38 @@ namespace auto_serial_bridge
     /**
      * @brief 根据编译期配置分派的校验和计算
      */
-    static uint8_t calculate_checksum(const uint8_t* data, size_t len)
-    {
-      if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
-        (void)data; (void)len;
-        return 0x00;
-      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::SUM8) {
-        uint8_t sum = 0;
-        for (size_t i = 0; i < len; ++i) sum += data[i];
-        return sum;
-      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::XOR8) {
-        uint8_t x = 0;
-        for (size_t i = 0; i < len; ++i) x ^= data[i];
-        return x;
-      } else {
-        uint8_t crc = 0;
-        for (size_t i = 0; i < len; ++i) crc = CRC8_TABLE[crc ^ data[i]];
-        return crc;
-      }
-    }
+	    static uint8_t calculate_checksum(const uint8_t* data, size_t len)
+	    {
+	      if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
+	        (void)data; (void)len;
+	        return 0x00;
+	      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::SUM8) {
+	        uint8_t sum = 0;
+	        for (size_t i = 0; i < len; ++i) sum += data[i];
+	        return sum;
+	      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::XOR8) {
+	        uint8_t x = 0;
+	        for (size_t i = 0; i < len; ++i) x ^= data[i];
+	        return x;
+	      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::CRC8) {
+#ifdef CHECKSUM_ALGO_CRC8
+	        uint8_t crc = 0;
+	        for (size_t i = 0; i < len; ++i) crc = CRC8_TABLE[crc ^ data[i]];
+	        return crc;
+#else
+	        static_assert(config::CHECKSUM_ALGO != config::ChecksumAlgo::CRC8,
+	                      "CRC8 selected but CRC8_TABLE is not available");
+	        return 0x00;
+#endif
+	      } else {
+	        static_assert(config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE ||
+	                      config::CHECKSUM_ALGO == config::ChecksumAlgo::SUM8 ||
+	                      config::CHECKSUM_ALGO == config::ChecksumAlgo::XOR8 ||
+	                      config::CHECKSUM_ALGO == config::ChecksumAlgo::CRC8,
+	                      "Unsupported checksum algorithm");
+	        return 0x00;
+	      }
+	    }
 
     /**
      * @brief 打包数据 (ROS -> MCU)

@@ -4,6 +4,7 @@ import sys
 import hashlib
 import argparse
 import re
+from datetime import datetime
 
 def generate_crc8_table():
     """生成CRC8查找表。
@@ -89,7 +90,13 @@ def render_block(blocks, key):
     content = blocks.get(key, "\n")
     return f"/* USER CODE BEGIN {key} */{content}/* USER CODE END {key} */\n"
 
-def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_path, user_blocks):
+
+def generate_timestamp() -> str:
+    """生成本地构建时间字符串。"""
+    return datetime.now().astimezone().isoformat(timespec='seconds')
+
+
+def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_path, user_blocks, generated_at):
     """生成MCU端使用的C语言头文件。
 
     Args:
@@ -103,6 +110,7 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     with open(output_path, 'w') as f:
+        f.write(f"// Generated at: {generated_at}\n")
         f.write("#pragma once\n")
         f.write("#include <stdint.h>\n")
         f.write("\n")
@@ -111,6 +119,7 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
 
         checksum_algo = config.get('checksum', 'CRC8').upper()
         require_handshake = config.get('require_handshake', True)
+        enable_heartbeat = config.get('enable_heartbeat', True)
 
         f.write("// 协议哈希校验码\n")
         f.write(f"#define PROTOCOL_HASH 0x{protocol_hash:08X}\n")
@@ -122,6 +131,10 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
 
         f.write(f"// 握手配置\n")
         f.write(f"#define CFG_REQUIRE_HANDSHAKE {1 if require_handshake else 0}\n")
+        f.write("\n")
+
+        f.write(f"// 心跳配置\n")
+        f.write(f"#define CFG_ENABLE_HEARTBEAT {1 if enable_heartbeat else 0}\n")
         f.write("\n")
 
         f.write(render_block(user_blocks, "Private_Defines"))
@@ -149,6 +162,16 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
             f.write("\n")
         f.write("#pragma pack()\n")
         f.write("\n")
+
+        f.write("// 协议辅助函数声明\n")
+        f.write("uint8_t calculate_checksum(const uint8_t* data, uint8_t len);\n")
+        f.write("void protocol_fsm_feed(uint8_t byte);\n")
+        f.write("\n")
+        f.write("// 用户可覆盖的接收回调与自动生成的发送函数声明\n")
+        for msg in messages:
+            f.write(f"void on_receive_{msg['name']}(const Packet_{msg['name']}* pkt);\n")
+            f.write(f"void send_{msg['name']}(const Packet_{msg['name']}* pkt);\n")
+        f.write("\n")
         
         f.write(render_block(user_blocks, "User_Types"))
         f.write("\n")
@@ -162,12 +185,16 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
                 f.write(f"    {line},\n")
             f.write("};\n")
 
-def generate_mcu_source(config, messages, output_path, user_blocks):
+
+def generate_mcu_source(config, messages, output_path, user_blocks, generated_at):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     buffer_size = config.get('buffer_size', 256)
     checksum_algo = config.get('checksum', 'CRC8').upper()
+    require_handshake = config.get('require_handshake', True)
+    enable_heartbeat = config.get('enable_heartbeat', True)
 
     with open(output_path, 'w') as f:
+        f.write(f"// Generated at: {generated_at}\n")
         f.write("#include \"protocol.h\"\n")
         f.write("#include <string.h>\n\n")
         f.write(render_block(user_blocks, "Includes"))
@@ -240,6 +267,14 @@ uint8_t calculate_checksum(const uint8_t* data, uint8_t len) {
             # Generate callback for ALL messages to support loopback/debugging/flexible config
             func_name = f"on_receive_{msg['name']}"
             f.write(f"__attribute__((weak)) void {func_name}(const Packet_{msg['name']}* pkt) {{\n")
+            if msg['name'] == 'Handshake' and require_handshake:
+                f.write("    // Default system behavior: ack matching protocol hash automatically.\n")
+                f.write("    if (pkt->protocol_hash == PROTOCOL_HASH) {\n")
+                f.write("        send_Handshake(pkt);\n")
+                f.write("    }\n")
+            if msg['name'] == 'Heartbeat' and enable_heartbeat:
+                f.write("    // Default system behavior: ack the latest heartbeat with the same count.\n")
+                f.write("    send_Heartbeat(pkt);\n")
             f.write(render_block(user_blocks, func_name))
             f.write("}\n")
 
@@ -577,6 +612,7 @@ def generate_cpp_config(config, output_path):
     require_handshake = config.get('require_handshake', True)
     qos_depth = config.get('qos_depth', 10)
     heartbeat_timeout_ms = config.get('heartbeat_timeout_ms', 3000)
+    enable_heartbeat = config.get('enable_heartbeat', True)
 
     with open(output_path, 'w') as f:
         f.write("#pragma once\n")
@@ -595,6 +631,7 @@ def generate_cpp_config(config, output_path):
         f.write(f"    constexpr ChecksumAlgo CHECKSUM_ALGO = ChecksumAlgo::{checksum_algo};\n\n")
 
         f.write(f"    constexpr bool REQUIRE_HANDSHAKE = {'true' if require_handshake else 'false'};\n")
+        f.write(f"    constexpr bool ENABLE_HEARTBEAT = {'true' if enable_heartbeat else 'false'};\n")
         f.write(f"    constexpr size_t QOS_DEPTH = {qos_depth};\n")
         f.write(f"    constexpr int HEARTBEAT_TIMEOUT_MS = {heartbeat_timeout_ms};\n")
 
@@ -645,7 +682,7 @@ def _field_table(fields: list, type_mappings: dict, checksum_algo: str = "CRC8")
 
 
 def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
-                    protocol_hash: int, output_path: str) -> None:
+                    protocol_hash: int, output_path: str, generated_at: str) -> None:
     """生成面向电控的 Markdown 通信协议文档。
 
     文档包含帧格式说明、电控发送/接收的消息列表及字段表格。
@@ -664,6 +701,7 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
     baudrate = config.get('baudrate', 115200)
     checksum = config.get('checksum', 'CRC8').upper()
     require_handshake = config.get('require_handshake', True)
+    enable_heartbeat = config.get('enable_heartbeat', True)
 
     _CHECKSUM_DESC = {
         "NONE": "无校验（占位字节 `0x00`）",
@@ -678,6 +716,7 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
 
     with open(output_path, 'w', encoding='utf-8') as f:
         # ── 文件头 ──
+        f.write(f"> 生成时间：{generated_at}\n")
         f.write("# MCU ↔ ROS 串口通信协议文档\n\n")
         f.write("> **Auto-generated** — 由 `scripts/codegen.py` 根据 `config/protocol.yaml` 生成，请勿手动修改。\n\n")
         f.write("---\n\n")
@@ -722,6 +761,8 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
                 f.write(f"- **数据段字节数（Len）**：`{total_bytes}`\n")
                 if msg.get('notes'):
                     f.write(f"- **注意事项**：{msg['notes']}\n")
+                if msg['name'] == 'Handshake' and require_handshake:
+                    f.write("- **默认生成行为**：`on_receive_Handshake()` 在收到匹配 `PROTOCOL_HASH` 的握手包后会自动调用 `send_Handshake(pkt)` 回包。\n")
                 f.write("\n")
                 f.write(_field_table(msg['fields'], type_mappings, checksum))
                 f.write("\n\n")
@@ -744,6 +785,10 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
                 f.write(f"- **数据段字节数（Len）**：`{total_bytes}`\n")
                 if msg.get('notes'):
                     f.write(f"- **注意事项**：{msg['notes']}\n")
+                if msg['name'] == 'Handshake' and require_handshake:
+                    f.write("- **默认生成行为**：`on_receive_Handshake()` 在收到匹配 `PROTOCOL_HASH` 的握手包后会自动调用 `send_Handshake(pkt)` 回包。\n")
+                if msg['name'] == 'Heartbeat' and enable_heartbeat:
+                    f.write("- **默认生成行为**：`on_receive_Heartbeat()` 会自动调用 `send_Heartbeat(pkt)`，按原样回同一个 `count` 作为 ACK。\n")
                 f.write("\n")
                 f.write(_field_table(msg['fields'], type_mappings, checksum))
                 f.write("\n\n")
@@ -829,18 +874,19 @@ def main():
     validate_protocol(config_data)
         
     phash = calculate_protocol_hash(content)
+    generated_at = generate_timestamp()
     
     mcu_header_path = os.path.join(output_dir, 'mcu_output', 'protocol.h')
     header_user_blocks = extract_user_code(mcu_header_path)
     
     generate_mcu_header(config_data['config'], config_data['messages'], config_data['type_mappings'], phash, 
-                        mcu_header_path, header_user_blocks)
+                        mcu_header_path, header_user_blocks, generated_at)
     
     mcu_source_path = os.path.join(output_dir, 'mcu_output', 'protocol.c')
     source_user_blocks = extract_user_code(mcu_source_path)
     
     generate_mcu_source(config_data['config'], config_data['messages'], 
-                        mcu_source_path, source_user_blocks)
+                        mcu_source_path, source_user_blocks, generated_at)
                         
     generate_cpp_config(config_data['config'],
                         os.path.join(output_dir, 'include', 'auto_serial_bridge', 'generated_config.hpp'))
@@ -850,7 +896,7 @@ def main():
                           os.path.join(output_dir, 'include', 'auto_serial_bridge', 'generated_bindings.hpp'))
 
     generate_mcu_doc(config_data['config'], config_data['messages'], config_data['type_mappings'],
-                     phash, os.path.join(output_dir, 'mcu_output', 'PROTOCOL_DOC.md'))
+                     phash, os.path.join(output_dir, 'mcu_output', 'PROTOCOL_DOC.md'), generated_at)
 
 if __name__ == "__main__":
     main()

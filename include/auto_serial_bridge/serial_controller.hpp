@@ -88,8 +88,12 @@ namespace generated { struct ProtocolPublishers; }
     
     // 心跳跟踪
     uint32_t heartbeat_count_ = 0;
-    std::chrono::steady_clock::time_point last_heartbeat_rx_time_;
-    bool heartbeat_rx_received_ = false;
+    uint32_t last_heartbeat_tx_count_ = 0;
+    std::chrono::steady_clock::time_point heartbeat_ack_wait_started_at_;
+    std::chrono::steady_clock::time_point last_heartbeat_ack_time_;
+    bool awaiting_heartbeat_ack_ = false;
+    bool heartbeat_ack_received_ = false;
+    bool enable_heartbeat_ = true;
     int heartbeat_timeout_ms_ = 3000;
 
     // 运行时计数器

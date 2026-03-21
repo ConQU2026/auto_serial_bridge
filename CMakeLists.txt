@@ -35,9 +35,11 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/config/protocol.yaml"
   "${CMAKE_CURRENT_SOURCE_DIR}/config/protocol-sample.yaml"
+  "${CMAKE_CURRENT_SOURCE_DIR}/package.xml"
 )
 
 set(PROTOCOL_YAML "${CMAKE_CURRENT_SOURCE_DIR}/config/protocol.yaml")
+set(PACKAGE_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/package.xml")
 if(NOT EXISTS "${PROTOCOL_YAML}")
   message(FATAL_ERROR
     "Auto Serial Bridge requires config/protocol.yaml for code generation. "
@@ -53,7 +55,7 @@ set(MCU_DOC "${CMAKE_CURRENT_SOURCE_DIR}/mcu_output/PROTOCOL_DOC.md")
 add_custom_command(
   OUTPUT ${MCU_HEADER} ${ROS_BINDINGS} ${MCU_SOURCE} ${CPP_CONFIG} ${MCU_DOC}
   COMMAND ${Python3_EXECUTABLE} ${CODEGEN_SCRIPT} ${PROTOCOL_YAML} ${CMAKE_CURRENT_SOURCE_DIR}
-  DEPENDS ${PROTOCOL_YAML} ${CODEGEN_SCRIPT}
+  DEPENDS ${PROTOCOL_YAML} ${CODEGEN_SCRIPT} ${PACKAGE_MANIFEST}
   COMMENT "Generating protocol code and documentation..."
 )
 
@@ -174,7 +176,16 @@ if(BUILD_TESTING)
   endforeach()
 
   # --- C. Python Pytest
-  ament_add_pytest_test(my_python_tests test/)
+  ament_add_pytest_test(
+    my_python_tests
+    test/
+    ENV "PYTEST_ADDOPTS=--ignore=${CMAKE_CURRENT_SOURCE_DIR}/test/test_checksum_build_matrix.py"
+  )
+  ament_add_pytest_test(
+    checksum_build_matrix
+    test/test_checksum_build_matrix.py
+    TIMEOUT 600
+  )
 endif()
 
 # ==============================================================================

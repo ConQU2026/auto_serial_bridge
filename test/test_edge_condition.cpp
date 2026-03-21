@@ -5,6 +5,25 @@
 
 using namespace auto_serial_bridge;
 
+namespace {
+
+std::vector<uint8_t> build_raw_frame(uint8_t id, const std::vector<uint8_t>& payload) {
+    std::vector<uint8_t> frame = {
+        FRAME_HEADER1,
+        FRAME_HEADER2,
+        id,
+        static_cast<uint8_t>(payload.size()),
+    };
+    frame.insert(frame.end(), payload.begin(), payload.end());
+
+    std::vector<uint8_t> checksum_payload = {id, static_cast<uint8_t>(payload.size())};
+    checksum_payload.insert(checksum_payload.end(), payload.begin(), payload.end());
+    frame.push_back(PacketHandler::calculate_checksum(checksum_payload.data(), checksum_payload.size()));
+    return frame;
+}
+
+}  // namespace
+
 class EdgeCaseTest : public ::testing::Test {
 protected:
     PacketHandler handler{4096};
@@ -12,22 +31,9 @@ protected:
 
 // 1. 未知 ID 测试
 TEST_F(EdgeCaseTest, UnknownID) {
-    // 手动构造具有 ID 0xFF 的数据包 
     uint8_t unknown_id = 0xFF;
     std::vector<uint8_t> data = {0x01, 0x02};
-    uint8_t len = data.size();
-    
-    // Header
-    std::vector<uint8_t> pkt = {FRAME_HEADER1, FRAME_HEADER2, unknown_id, len};
-    // 数据
-    pkt.insert(pkt.end(), data.begin(), data.end());
-    // 计算 CRC (CRC 覆盖 ID, Len, Data)
-    std::vector<uint8_t> crc_payload = {unknown_id, len};
-    crc_payload.insert(crc_payload.end(), data.begin(), data.end());
-    
-    uint8_t crc = 0;
-    for(auto b : crc_payload) crc = CRC8_TABLE[crc ^ b];
-    pkt.push_back(crc);
+    std::vector<uint8_t> pkt = build_raw_frame(unknown_id, data);
     
     handler.feed_data(pkt);
     Packet out;
@@ -41,22 +47,8 @@ TEST_F(EdgeCaseTest, UnknownID) {
 
 // 2. 零长度载荷测试
 TEST_F(EdgeCaseTest, ZeroLengthPayload) {
-    // 构造 len = 0 的数据包
-    // uint8_t id = PACKET_ID_HEARTBEAT; // Assume heartbeat can be empty for test (Removed unused var)
-    uint8_t len = 0;
-    
-    // 握手包通常是 4 字节，心跳包是 1 字节。
-    // 让我们为 ID 0xEE 强制构造一个 0 长度的数据包
     uint8_t test_id = 0xEE;
-    
-    std::vector<uint8_t> pkt = {FRAME_HEADER1, FRAME_HEADER2, test_id, len};
-    // 无数据
-    
-    // CRC
-    uint8_t crc = 0;
-    crc = CRC8_TABLE[crc ^ test_id];
-    crc = CRC8_TABLE[crc ^ len]; // 0
-    pkt.push_back(crc);
+    std::vector<uint8_t> pkt = build_raw_frame(test_id, {});
     
     handler.feed_data(pkt);
     Packet out;
@@ -68,22 +60,8 @@ TEST_F(EdgeCaseTest, ZeroLengthPayload) {
 // 3. 最大长度载荷 (255)
 TEST_F(EdgeCaseTest, MaxLengthPayload) {
     uint8_t test_id = 0xEE;
-    uint8_t len = 255;
     std::vector<uint8_t> data(255, 0xAB);
-    
-    std::vector<uint8_t> pkt;
-    pkt.reserve(5 + data.size());
-    pkt.push_back(FRAME_HEADER1);
-    pkt.push_back(FRAME_HEADER2);
-    pkt.push_back(test_id);
-    pkt.push_back(len);
-    pkt.insert(pkt.end(), data.begin(), data.end());
-    
-    uint8_t crc = 0;
-    crc = CRC8_TABLE[crc ^ test_id];
-    crc = CRC8_TABLE[crc ^ len]; 
-    for(auto b : data) crc = CRC8_TABLE[crc ^ b];
-    pkt.push_back(crc);
+    std::vector<uint8_t> pkt = build_raw_frame(test_id, data);
     
     handler.feed_data(pkt);
     Packet out;
@@ -122,11 +100,14 @@ TEST_F(EdgeCaseTest, PartialThenValid) {
     
     handler.feed_data(valid_pkt);
     
-    // 同步逻辑:
-    // 处理器将首先尝试解析部分数据包，CRC 失败，然后滑动窗口直到找到有效数据包。
-    
-    ASSERT_TRUE(handler.parse_packet(out));
-    EXPECT_EQ(out.id, PACKET_ID_HEARTBEAT);
+    if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
+        GTEST_SKIP() << "NONE 算法不提供坏包检测，半包恢复语义不适用";
+    } else {
+        // 同步逻辑:
+        // 处理器将首先尝试解析部分数据包，CRC 失败，然后滑动窗口直到找到有效数据包。
+        ASSERT_TRUE(handler.parse_packet(out));
+        EXPECT_EQ(out.id, PACKET_ID_HEARTBEAT);
+    }
 }
 
 // 5. 环形缓冲区回绕
@@ -240,9 +221,29 @@ TEST_F(EdgeCaseTest, ByteByByteFeed) {
 
 // 8. 伪帧头混淆测试
 TEST_F(EdgeCaseTest, FalseHeaderSequence) {
-    // 1. 看起来像帧头的噪音: 0x5A, 0xA5, 但后续 CRC 错误
-    //    或者帧结构有效但 CRC 校验稍后失败。
-    std::vector<uint8_t> noise = {(uint8_t)FRAME_HEADER1, (uint8_t)FRAME_HEADER2, 0x01, 0x01, 0xFF, 0xFF}; // CRC 错误
+    const uint8_t noise_id = 0x01;
+    const std::vector<uint8_t> noise_payload = {0xFF};
+    std::vector<uint8_t> noise = {
+        FRAME_HEADER1,
+        FRAME_HEADER2,
+        noise_id,
+        static_cast<uint8_t>(noise_payload.size()),
+        noise_payload.front(),
+    };
+
+    std::vector<uint8_t> checksum_payload = {
+        noise_id,
+        static_cast<uint8_t>(noise_payload.size()),
+        noise_payload.front(),
+    };
+    uint8_t wrong_checksum = 0xFF;
+    if constexpr (config::CHECKSUM_ALGO != config::ChecksumAlgo::NONE) {
+        wrong_checksum = PacketHandler::calculate_checksum(
+            checksum_payload.data(),
+            checksum_payload.size()
+        ) ^ 0xFF;
+    }
+    noise.push_back(wrong_checksum);
     
     // 2. 真实数据包
     auto real_pkt = handler.pack(PACKET_ID_HEARTBEAT, Packet_Heartbeat{99});
@@ -254,12 +255,16 @@ TEST_F(EdgeCaseTest, FalseHeaderSequence) {
     handler.feed_data(stream);
     
     Packet out;
-    // 解析器应该拒绝噪音 (CRC 不匹配) 并丢弃第一个 '0x5A',
-    // 然后重新扫描，最终找到真实数据包。
-    ASSERT_TRUE(handler.parse_packet(out));
+    if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
+        ASSERT_TRUE(handler.parse_packet(out));
+        ASSERT_TRUE(handler.parse_packet(out));
+    } else {
+        // 解析器应该拒绝噪音 (CRC 不匹配) 并丢弃第一个 '0x5A',
+        // 然后重新扫描，最终找到真实数据包。
+        ASSERT_TRUE(handler.parse_packet(out));
+    }
+
     EXPECT_EQ(out.id, PACKET_ID_HEARTBEAT);
-    
-    // 确保我们消耗了正确的那一个
     EXPECT_EQ(out.as<Packet_Heartbeat>().count, 99);
 }
 

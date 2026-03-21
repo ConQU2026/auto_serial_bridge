@@ -52,22 +52,33 @@ namespace auto_serial_bridge
             }
 
             if (state_ == State::RUNNING) {
-                Packet_Heartbeat hb_pkt;
-                hb_pkt.count = heartbeat_count_++;
-                send_packet(PACKET_ID_HEARTBEAT, hb_pkt);
+                if (!enable_heartbeat_) {
+                    return;
+                }
 
-                if (heartbeat_timeout_ms_ > 0 && heartbeat_rx_received_) {
-                    auto elapsed = std::chrono::steady_clock::now() - last_heartbeat_rx_time_;
+                auto now = std::chrono::steady_clock::now();
+
+                if (heartbeat_timeout_ms_ > 0 && awaiting_heartbeat_ack_) {
+                    auto elapsed = now - heartbeat_ack_wait_started_at_;
                     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
                     if (elapsed_ms > heartbeat_timeout_ms_) {
                         RCLCPP_WARN(this->get_logger(),
-                            "心跳超时 (%ld ms > %d ms)，MCU 可能已断连",
+                            "心跳确认超时 (%ld ms > %d ms)，MCU 可能已断连",
                             static_cast<long>(elapsed_ms), heartbeat_timeout_ms_);
                         is_connected_ = false;
-                        heartbeat_rx_received_ = false;
                         reset_serial();
+                        return;
                     }
                 }
+
+                Packet_Heartbeat hb_pkt;
+                hb_pkt.count = heartbeat_count_++;
+                last_heartbeat_tx_count_ = hb_pkt.count;
+                if (!awaiting_heartbeat_ack_) {
+                    awaiting_heartbeat_ack_ = true;
+                    heartbeat_ack_wait_started_at_ = now;
+                }
+                send_packet(PACKET_ID_HEARTBEAT, hb_pkt);
             }
         });
   }
@@ -118,6 +129,7 @@ namespace auto_serial_bridge
     this->declare_parameter<std::string>("port", "/dev/ttyUSB0");
     this->declare_parameter<int>("baudrate", auto_serial_bridge::config::DEFAULT_BAUDRATE);
     this->declare_parameter<double>("timeout", 0.1);
+    this->declare_parameter<bool>("enable_heartbeat", config::ENABLE_HEARTBEAT);
     this->declare_parameter<int>("heartbeat_timeout_ms", static_cast<int>(config::HEARTBEAT_TIMEOUT_MS));
 
     this->get_parameter("port", port_);
@@ -125,10 +137,16 @@ namespace auto_serial_bridge
     this->get_parameter("baudrate", baudrate_temp);
     baudrate_ = static_cast<uint32_t>(baudrate_temp);
     this->get_parameter("timeout", timeout_);
+    this->get_parameter("enable_heartbeat", enable_heartbeat_);
     this->get_parameter("heartbeat_timeout_ms", heartbeat_timeout_ms_);
 
-    RCLCPP_INFO(this->get_logger(), "Port: %s, Baudrate: %u, HeartbeatTimeout: %dms",
-                port_.c_str(), baudrate_, heartbeat_timeout_ms_);
+    RCLCPP_INFO(
+        this->get_logger(),
+        "Port: %s, Baudrate: %u, EnableHeartbeat: %s, HeartbeatTimeout: %dms",
+        port_.c_str(),
+        baudrate_,
+        enable_heartbeat_ ? "true" : "false",
+        heartbeat_timeout_ms_);
   }
 
   bool SerialController::try_open_serial()
@@ -164,7 +182,9 @@ namespace auto_serial_bridge
     }
     state_ = config::REQUIRE_HANDSHAKE ? State::WAITING_HANDSHAKE : State::RUNNING;
     heartbeat_count_ = 0;
-    heartbeat_rx_received_ = false;
+    last_heartbeat_tx_count_ = 0;
+    awaiting_heartbeat_ack_ = false;
+    heartbeat_ack_received_ = false;
   }
 
   void SerialController::check_connection()
@@ -195,9 +215,10 @@ namespace auto_serial_bridge
       const Packet_Handshake* data = reinterpret_cast<const Packet_Handshake*>(pkt.payload.data());
       if (data->protocol_hash == PROTOCOL_HASH) {
           state_ = State::RUNNING;
-          last_heartbeat_rx_time_ = std::chrono::steady_clock::now();
-          heartbeat_rx_received_ = true;
           heartbeat_count_ = 0;
+          last_heartbeat_tx_count_ = 0;
+          awaiting_heartbeat_ack_ = false;
+          heartbeat_ack_received_ = false;
           RCLCPP_INFO(this->get_logger(), "Handshake SUCCESS! Protocol Hash Matched. Entering RUNNING state.");
       } else {
           RCLCPP_INFO(this->get_logger(), "Hash mismatch : Local: 0x%08X, Remote: 0x%08X", PROTOCOL_HASH, data->protocol_hash);
@@ -233,8 +254,22 @@ namespace auto_serial_bridge
                  auto* pubs = protocol_impl_.get();
 
                  if (pkt.id == PACKET_ID_HEARTBEAT && state_ == State::RUNNING) {
-                     last_heartbeat_rx_time_ = std::chrono::steady_clock::now();
-                     heartbeat_rx_received_ = true;
+                     if (!enable_heartbeat_) {
+                         continue;
+                     }
+                     if (pkt.payload.size() == sizeof(Packet_Heartbeat)) {
+                         const auto* data = reinterpret_cast<const Packet_Heartbeat*>(pkt.payload.data());
+                         if (awaiting_heartbeat_ack_ && data->count == last_heartbeat_tx_count_) {
+                             awaiting_heartbeat_ack_ = false;
+                             heartbeat_ack_received_ = true;
+                             last_heartbeat_ack_time_ = std::chrono::steady_clock::now();
+                         } else {
+                             RCLCPP_WARN_THROTTLE(
+                                 this->get_logger(), *this->get_clock(), 2000,
+                                 "忽略不匹配的心跳确认: expected=%u, got=%u",
+                                 last_heartbeat_tx_count_, data->count);
+                         }
+                     }
                  }
 
                  if constexpr (config::REQUIRE_HANDSHAKE) {

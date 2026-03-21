@@ -123,7 +123,12 @@ TEST_F(PacketHandlerTest, ChecksumError) {
     
     handler.feed_data(bytes);
     Packet pkt;
-    EXPECT_FALSE(handler.parse_packet(pkt));
+    if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
+        ASSERT_TRUE(handler.parse_packet(pkt));
+        EXPECT_EQ(pkt.id, PACKET_ID_HEARTBEAT);
+    } else {
+        EXPECT_FALSE(handler.parse_packet(pkt));
+    }
 }
 
 TEST_F(PacketHandlerTest, NoiseBeforeHeader) {

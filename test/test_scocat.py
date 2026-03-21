@@ -2,6 +2,8 @@ import os
 import time
 import subprocess
 import shutil
+import tempfile
+from pathlib import Path
 import pytest
 import rclpy
 
@@ -14,33 +16,35 @@ def socat_process():
 	if not _have_socat():
 		pytest.skip("socat not found; skipping virtual-serial tests")
 
-	cmd = [
-		"socat",
-		"-d",
-		"-d",
-		"PTY,link=/tmp/vtty0,raw,echo=0",
-		"PTY,link=/tmp/vtty1,raw,echo=0",
-	]
+	with tempfile.TemporaryDirectory(prefix="scocat_pty_") as temp_dir:
+		pty0 = Path(temp_dir) / "vtty0"
+		pty1 = Path(temp_dir) / "vtty1"
+		cmd = [
+			"socat",
+			"-d",
+			"-d",
+			f"PTY,link={pty0},raw,echo=0",
+			f"PTY,link={pty1},raw,echo=0",
+		]
 
-	p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-											 stderr=subprocess.DEVNULL)
+		p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+												 stderr=subprocess.DEVNULL)
 
-	# 等待设备节点
-	for _ in range(40):
-		if os.path.exists("/tmp/vtty0") and os.path.exists("/tmp/vtty1"):
-			break
-		time.sleep(0.05)
-	else:
+		for _ in range(40):
+			if pty0.exists() and pty1.exists():
+				break
+			time.sleep(0.05)
+		else:
+			p.terminate()
+			pytest.skip("socat failed to create virtual PTYs")
+
+		yield p, str(pty0), str(pty1)
+
 		p.terminate()
-		pytest.skip("socat failed to create virtual PTYs")
-
-	yield p
-
-	p.terminate()
-	try:
-		p.wait(timeout=1)
-	except Exception:
-		p.kill()
+		try:
+			p.wait(timeout=1)
+		except Exception:
+			p.kill()
 
 
 @pytest.fixture(scope="function")
@@ -50,8 +54,9 @@ def serial_ports(socat_process):
 	except Exception:
 		pytest.skip("pyserial not installed; skipping serial tests")
 
-	s0 = serial.Serial("/tmp/vtty0", baudrate=115200, timeout=1)
-	s1 = serial.Serial("/tmp/vtty1", baudrate=115200, timeout=1)
+	_, pty0, pty1 = socat_process
+	s0 = serial.Serial(pty0, baudrate=115200, timeout=1)
+	s1 = serial.Serial(pty1, baudrate=115200, timeout=1)
 
 	# 清空任何初始数据
 	try:
@@ -78,4 +83,3 @@ def test_loopback(serial_ports):
 
 	data = s1.read(len(msg))
 	assert data == msg
-

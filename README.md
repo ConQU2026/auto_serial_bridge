@@ -52,13 +52,21 @@ sudo ./auto_udev.sh
 
 ### 2. 配置`protocol.yaml`文件
 
-项目提供了一个名为 `config/protocol-sample.yaml` 的示例文件。在开始之前，请将其复制为 `protocol.yaml`（该文件已被加入 `.gitignore`，不会被 Git 追踪，方便你在本地进行自定义配置）：
+开源仓库不附带生产环境的 `config/protocol.yaml`。项目提供了一个名为 `config/protocol-sample.yaml` 的示例文件，但它不参与默认构建，也不是运行时 fallback。
+
+`config/protocol-sample.yaml` 仅用于示例和公开自检；真正的本地/私有部署构建前，仍然需要你自行准备 `config/protocol.yaml`（该文件已被加入 `.gitignore`，不会被 Git 追踪，方便你在本地进行自定义配置）：
 
 ```bash
 cp config/protocol-sample.yaml config/protocol.yaml
 ```
 
-核心配置文件位于 `config/protocol.yaml`。可通过修改此文件来增删改数据协议，**修改后重新编译即可生效**。
+核心配置文件位于 `config/protocol.yaml`。可通过修改此文件来增删改数据协议，**修改后重新编译即可生效**。如果缺少该文件，真实 `colcon build` 会直接失败。
+
+当前仓库的构建触发契约如下：
+
+- 修改 `config/protocol.yaml` 后需要重新编译。
+- 修改 `package.xml` 的 `<version>` 后，同样会触发重新构建流程。
+- 两者都不变时，保留当前增量构建行为，不额外重跑代码生成。
 
 #### 参数配置
 ```yaml
@@ -76,6 +84,10 @@ config:
   head_byte_1: 0x5A      # 双帧头 1
   head_byte_2: 0xA5      # 双帧头 2
   checksum: "CRC8"       # 校验算法
+  require_handshake: true
+  enable_heartbeat: true # false = 不发送 Heartbeat, 也不做 ACK 断连检测
+  qos_depth: 10
+  heartbeat_timeout_ms: 3000 # 仅在 enable_heartbeat=true 时参与检测; 0 = 不检测
 ```
 
 #### 消息定义
@@ -117,11 +129,17 @@ messages:
 > 代码生成器支持类似 CubeMX 的用户代码保护功能，在 `/* USER CODE BEGIN */` 和 `/* USER CODE END */` 之间的代码在重新生成时不会被覆盖。
 
 > [!IMPORTANT]
-> **握手要求**：目前版本强制要求上下位机进行版本握手。电控在接收到 ROS 的握手包后，必须使用 `send_Handshake()` 回复相同的 `protocol_hash`。
+> **握手要求**：当 `require_handshake=true` 时，生成的 MCU `protocol.c` 会在默认 `on_receive_Handshake()` 中对匹配 `PROTOCOL_HASH` 的握手包自动调用 `send_Handshake()` 回包；如需附加业务逻辑，可在对应 `USER CODE` 区块中追加。
+>
+> **心跳要求**：当 `enable_heartbeat=true` 时，生成的 MCU `protocol.c` 会在默认 `on_receive_Heartbeat()` 中自动调用 `send_Heartbeat(pkt)`，按原样回同一个 `count` 作为确认；电控不再需要自己实现固定 ACK 逻辑，也不应独立主动发送心跳。
+>
+> `enable_heartbeat=true` 且 `heartbeat_timeout_ms>0` 时，ROS 会发送心跳并在 ACK 超时后断开重连；
+> `enable_heartbeat=true` 且 `heartbeat_timeout_ms=0` 时，ROS 仍发送心跳，但不会因 ACK 超时判定断连；
+> `enable_heartbeat=false` 时，ROS 不发送心跳，也不做 ACK 断连检测。
 
 ### 4. 编译项目
 
-在你的 ROS2 工作空间根目录下：
+在你的 ROS2 工作空间根目录下，且已经自行准备好私有 `config/protocol.yaml` 后：
 
 ```bash
 colcon build --packages-select auto_serial_bridge
@@ -138,7 +156,21 @@ source install/setup.bash
 
 ## 测试
 
-运行单元测试：
+本仓库区分两类验证：
+
+1. 公开自检：用于保证示例协议和代码生成脚本没有损坏。
+2. 私有构建/运行验证：依赖你自己的 `config/protocol.yaml`，只在本地或私有环境执行。
+
+公开 CI 只校验 sample 和 codegen，不执行 `colcon build` 或 `colcon test`。
+
+公开自检可直接运行：
+```bash
+tmpdir="$(mktemp -d)"
+python3 scripts/codegen.py config/protocol-sample.yaml "$tmpdir"
+python3 -m pytest -q test/test_codegen_checksum.py test/test_public_ci_contract.py
+```
+
+私有协议已经就绪时，仍可在本地执行完整包级测试：
 ```bash
 colcon test --packages-select auto_serial_bridge --event-handlers console_direct+
 ```
@@ -149,7 +181,7 @@ colcon test --packages-select auto_serial_bridge --event-handlers console_direct
     *   **核心特性**：
         *   支持 `protocol.yaml` 配置变化检测，仅在配置更改时触发重新生成。
         *   自动生成面向电控的协议文档 `PROTOCOL_DOC.md`。
-        *   支持双向心跳检测（Heartbeat）与版本哈希握手（Handshake）。
+        *   支持 ROS 主动心跳确认（Heartbeat）与版本哈希握手（Handshake）。
         *   支持用户代码块保护，增量式开发更友好。
 *   **Beta**: 初始验证版本。
 
