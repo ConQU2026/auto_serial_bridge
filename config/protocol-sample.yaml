@@ -1,17 +1,21 @@
-# 0. ROS2 参数配置 
+# 0. ROS2 参数配置
 serial_controller:
   ros__parameters:
     port: "/dev/stm32"
-    baudrate: &baudrate 115200
+    baudrate: 115200
     timeout: 0.1
 
 # 1. 全局配置
 config:
-  baudrate: *baudrate
+  baudrate: 115200
   buffer_size: 256
   head_byte_1: 0x5A      # 双帧头 1
   head_byte_2: 0xA5      # 双帧头 2
-  checksum: "CRC8"       # 校验算法
+  checksum: "CRC8"              # 校验算法, 可选: NONE, SUM8, XOR8, CRC8
+  require_handshake: true       # false = 跳过握手, 上电直接进入 RUNNING, 握手内容为配置文件hash
+  enable_heartbeat: true        # false = 不发送 Heartbeat, 也不做 ACK 断连检测
+  qos_depth: 10                 
+  heartbeat_timeout_ms: 3000    # 心跳确认超时毫秒数 (0 = 不检测)
 
 # 2. 类型映射
 type_mappings:
@@ -26,11 +30,10 @@ messages:
   # 3.0 系统消息
   - name: "Heartbeat"
     id: 0x00
-    direction: "both"
+    direction: "tx"
     sub_topic: "/task/heartbeat"
-    pub_topic: "/task/heartbeat"
     ros_msg: "std_msgs/msg/UInt32"
-    notes: "握手完成后，电控应以固定周期（建议 100ms）持续发送心跳，ROS 侧也会同频回应。count 字段单调递增，从 0 开始。"
+    notes: "握手完成后，ROS 侧以固定周期下发心跳。电控收到后必须尽快原样回同一个 count 作为确认，但不再独立主动发送心跳。只有与 ROS 最近一次发送值一致的回包才算有效确认。"
     fields:
       - { proto: "count", type: "u32", ros: "data" }
 
@@ -55,4 +58,3 @@ messages:
       - { proto: "linear_x",  type: "f32", ros: "linear.x" }
       - { proto: "linear_y",  type: "f32", ros: "linear.y" }
       - { proto: "angular_z", type: "f32", ros: "angular.z" }
-

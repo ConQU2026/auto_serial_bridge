@@ -3,11 +3,11 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <unordered_map>
 #include <functional>
 #include <mutex>
 #include <atomic>
-#include <map>
+#include <chrono>
+#include <unordered_map>
 
 #include "rcutils/logging.h"
 #include "rclcpp/rclcpp.hpp"
@@ -19,6 +19,9 @@
 
 namespace auto_serial_bridge
 {
+
+namespace generated { struct ProtocolPublishers; }
+
   /**
    * @brief 串口控制节点
    */
@@ -28,34 +31,22 @@ namespace auto_serial_bridge
     explicit SerialController(const rclcpp::NodeOptions &options);
     ~SerialController() override;
 
-    // 发送数据包的模板方法 (供生成的绑定代码使用)
     template <typename T>
     void send_packet(PacketID id, const T& data) {
          auto bytes = packet_handler_.pack(id, data);
          async_send(bytes);
+         tx_packet_count_++;
     }
 
-    // 发布消息的模板方法 (供生成的绑定代码使用)
-    template <typename MsgT>
-    void publish_message(const std::string& topic, const MsgT& msg) {
-        std::string key = topic;
-        // 优化: 先检查是否存在 (如果从多个线程动态添加publisher，这里不是线程安全的，但在当前上下文中是可接受的)
-        if (publishers_map_.find(key) == publishers_map_.end()) {
-             // 如果不存在则创建发布者
-             publishers_map_[key] = this->create_publisher<MsgT>(topic, 10);
-        }
-        
-        // 动态转换为具体类型的发布者
-        auto pub = std::dynamic_pointer_cast<rclcpp::Publisher<MsgT>>(publishers_map_[key]);
-        if (pub) {
-            pub->publish(msg);
-        }
-    }
-
-    // 保持订阅对象存活的辅助函数
     void add_subscription(std::shared_ptr<rclcpp::SubscriptionBase> sub) {
         subscriptions_.push_back(sub);
     }
+
+    void register_loopback_publisher(
+        PacketID id,
+        const std::shared_ptr<rclcpp::PublisherBase>& publisher);
+
+    bool should_skip_loopback(PacketID id, const rclcpp::MessageInfo& info) const;
 
   private:
     void get_parameters();
@@ -65,10 +56,9 @@ namespace auto_serial_bridge
     void reset_serial();
     bool try_open_serial();
     
-    // 状态机
     enum class State {
-        WAITING_HANDSHAKE, // 等待握手
-        RUNNING            // 运行中
+        WAITING_HANDSHAKE,
+        RUNNING
     };
     State state_;
     void process_handshake(const Packet& pkt);
@@ -77,28 +67,43 @@ namespace auto_serial_bridge
     std::shared_ptr<drivers::common::IoContext> ctx_;
     std::unique_ptr<drivers::serial_driver::SerialDriver> driver_;
     std::unique_ptr<drivers::serial_driver::SerialPortConfig> device_config_;
-    std::mutex rx_mutex_; // 接收缓冲区互斥锁 
+
+    /**
+     * rx_mutex_ 保护 packet_handler_ 的 feed_data() 和 parse_packet()。
+     * async_receive 回调在 IoContext 线程中串行执行，但为了防止
+     * 与其他线程（如定时器）的潜在竞争，统一加锁。
+     */
+    std::mutex rx_mutex_;
 
     PacketHandler packet_handler_;
     
-    // 通用存储，用于保持Publisher存活
-    std::map<std::string, std::shared_ptr<rclcpp::PublisherBase>> publishers_map_;
     std::vector<std::shared_ptr<rclcpp::SubscriptionBase>> subscriptions_;
+    std::unordered_map<uint8_t, std::weak_ptr<rclcpp::PublisherBase>> loopback_publishers_;
+    mutable std::mutex loopback_publishers_mutex_;
     
     // 定时器和状态
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr heartbeat_timer_;
-    std::atomic<bool> is_connected_{false}; // 连接状态
+    std::atomic<bool> is_connected_{false};
     
-    rclcpp::Time last_handshake_time_;
-    rclcpp::Time last_heartbeat_time_;
+    // 心跳跟踪
+    uint32_t heartbeat_count_ = 0;
+    uint32_t last_heartbeat_tx_count_ = 0;
+    std::chrono::steady_clock::time_point heartbeat_ack_wait_started_at_;
+    std::chrono::steady_clock::time_point last_heartbeat_ack_time_;
+    bool awaiting_heartbeat_ack_ = false;
+    bool heartbeat_ack_received_ = false;
+    bool enable_heartbeat_ = true;
+    int heartbeat_timeout_ms_ = 3000;
+
+    // 运行时计数器
+    std::atomic<uint32_t> tx_packet_count_{0};
 
     // 参数
     std::string port_;
     uint32_t baudrate_;
     double timeout_;
 
-    // 存储生成的 ProtocolPublishers 结构体 (使用 void* 避免循环依赖)
-    std::shared_ptr<void> protocol_impl_;
+    std::shared_ptr<generated::ProtocolPublishers> protocol_impl_;
   };
 } // namespace auto_serial_bridge

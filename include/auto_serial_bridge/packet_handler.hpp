@@ -1,9 +1,11 @@
 #pragma once
 
 #include "auto_serial_bridge/protocol.hpp"
+#include "auto_serial_bridge/generated_config.hpp"
 #include <vector>
 #include <iostream>
 #include <algorithm>
+#include <cstdint>
 
 namespace auto_serial_bridge
 {
@@ -12,17 +14,52 @@ namespace auto_serial_bridge
    * @brief 数据包处理类
    *
    * 负责数据的校验、打包和解包。使用环形缓冲区实现零拷贝和高性能解析。
+   *
+   * 线程模型: feed_data() 和 parse_packet() 必须在同一线程中顺序调用，
+   * 或者由调用方持有同一把锁来保护。在 SerialController 中，两者均在
+   * IoContext 的 async_receive 回调中串行执行，由 rx_mutex_ 统一保护。
    */
   class PacketHandler
   {
   private:
     std::vector<uint8_t> ring_buffer_;
-    size_t head_ = 0; // Write index
-    size_t tail_ = 0; // Read index
+    size_t head_ = 0;
+    size_t tail_ = 0;
     size_t capacity_;
     
-    // 最小包长: Header(2) + ID(1) + Len(1) + CRC(1) = 5 字节 (假设载荷为0)
     static constexpr size_t MIN_PACKET_SIZE = 5; 
+
+    uint32_t overflow_count_ = 0;
+    uint32_t crc_error_count_ = 0;
+    uint32_t rx_packet_count_ = 0;
+
+    static uint8_t calculate_checksum_from_ring(
+        const std::vector<uint8_t> & ring_buffer,
+        size_t capacity,
+        size_t start,
+        size_t count)
+    {
+      uint8_t checksum = 0;
+      for (size_t i = 0; i < count; ++i) {
+        const uint8_t byte = ring_buffer[(start + i) % capacity];
+        if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
+          (void)byte;
+          checksum = 0x00;
+        } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::SUM8) {
+          checksum += byte;
+        } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::XOR8) {
+          checksum ^= byte;
+        } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::CRC8) {
+#ifdef CHECKSUM_ALGO_CRC8
+          checksum = CRC8_TABLE[checksum ^ byte];
+#else
+          static_assert(config::CHECKSUM_ALGO != config::ChecksumAlgo::CRC8,
+                        "CRC8 selected but CRC8_TABLE is not available");
+#endif
+        }
+      }
+      return checksum;
+    }
 
   public:
     explicit PacketHandler(size_t buffer_size) : capacity_(buffer_size + 1)
@@ -30,18 +67,51 @@ namespace auto_serial_bridge
        ring_buffer_.resize(capacity_);
     }
 
-    /**
-     * @brief 计算校验和 (查表法)
-     */
-    static uint8_t calculate_checksum(const uint8_t* data, size_t len)
+    uint32_t overflow_count()  const { return overflow_count_; }
+    uint32_t crc_error_count() const { return crc_error_count_; }
+    uint32_t rx_packet_count() const { return rx_packet_count_; }
+
+    void reset()
     {
-      uint8_t crc = 0;
-      for (size_t i = 0; i < len; ++i)
-      {
-        crc = CRC8_TABLE[crc ^ data[i]];
-      }
-      return crc;
+        head_ = 0;
+        tail_ = 0;
     }
+
+    /**
+     * @brief 根据编译期配置分派的校验和计算
+     */
+	    static uint8_t calculate_checksum(const uint8_t* data, size_t len)
+	    {
+	      if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
+	        (void)data; (void)len;
+	        return 0x00;
+	      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::SUM8) {
+	        uint8_t sum = 0;
+	        for (size_t i = 0; i < len; ++i) sum += data[i];
+	        return sum;
+	      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::XOR8) {
+	        uint8_t x = 0;
+	        for (size_t i = 0; i < len; ++i) x ^= data[i];
+	        return x;
+	      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::CRC8) {
+#ifdef CHECKSUM_ALGO_CRC8
+	        uint8_t crc = 0;
+	        for (size_t i = 0; i < len; ++i) crc = CRC8_TABLE[crc ^ data[i]];
+	        return crc;
+#else
+	        static_assert(config::CHECKSUM_ALGO != config::ChecksumAlgo::CRC8,
+	                      "CRC8 selected but CRC8_TABLE is not available");
+	        return 0x00;
+#endif
+	      } else {
+	        static_assert(config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE ||
+	                      config::CHECKSUM_ALGO == config::ChecksumAlgo::SUM8 ||
+	                      config::CHECKSUM_ALGO == config::ChecksumAlgo::XOR8 ||
+	                      config::CHECKSUM_ALGO == config::ChecksumAlgo::CRC8,
+	                      "Unsupported checksum algorithm");
+	        return 0x00;
+	      }
+	    }
 
     /**
      * @brief 打包数据 (ROS -> MCU)
@@ -73,26 +143,27 @@ namespace auto_serial_bridge
 
     /**
      * @brief 接收数据投喂口
+     * @return 本次调用丢弃的字节数 (0 = 无溢出)
      */
-    void feed_data(const uint8_t* data, size_t len)
+    size_t feed_data(const uint8_t* data, size_t len)
     {
-        // 简单实现：循环写入
+        size_t dropped = 0;
         for (size_t i = 0; i < len; ++i) {
             size_t next_head = (head_ + 1) % capacity_;
-            if (next_head != tail_) { // 未满
+            if (next_head != tail_) {
                 ring_buffer_[head_] = data[i];
                 head_ = next_head;
             } else {
-                // 缓冲区溢出，丢弃数据或处理错误
-                // 目前简单丢弃新数据
+                dropped = len - i;
+                overflow_count_++;
                 break; 
             }
         }
+        return dropped;
     }
     
-    // std::vector 的兼容包装器
-    void feed_data(const std::vector<uint8_t>& data) {
-        feed_data(data.data(), data.size());
+    size_t feed_data(const std::vector<uint8_t>& data) {
+        return feed_data(data.data(), data.size());
     }
 
     /**
@@ -123,48 +194,52 @@ namespace auto_serial_bridge
             uint8_t len_byte = ring_buffer_[(tail_ + 3) % capacity_];
             
             size_t total_len = 2 + 1 + 1 + len_byte + 1; // Header(2) + ID(1) + Len(1) + Payload(N) + CRC(1)
+
+            if (total_len > capacity_ - 1) {
+                // 当前候选帧即使完整到达也无法驻留在环形缓冲区中，只能丢弃头字节后重同步。
+                tail_ = (tail_ + 1) % capacity_;
+                continue;
+            }
+
+            if (len_byte > config::MAX_PACKET_PAYLOAD_SIZE) {
+                tail_ = (tail_ + 1) % capacity_;
+                continue;
+            }
+
+            const size_t expected_len = config::expected_payload_size(static_cast<PacketID>(id_byte));
+            if (expected_len == 0 || len_byte != expected_len) {
+                tail_ = (tail_ + 1) % capacity_;
+                continue;
+            }
             
             if (data_available() < total_len) return false; // 等待完整数据包
             
-            // 检查 CRC
-            // 我们需要对 ID, Len, Payload 进行 CRC校验。
-            // ID 在偏移 2, Len 在 3, Payload 在 4...
-            // 直接在环形缓冲区上计算更好，但需要处理回绕。
-            
-            uint8_t calc_crc = 0;
-            // 迭代范围: ID (index 2) 到 payload 结束
-            // 范围: ID, Len, Payload. 
-            // 起始索引: (tail_ + 2) % capacity_
-            // 计数: 1 + 1 + len_byte = 2 + len_byte
-            
-            size_t crc_start_idx = (tail_ + 2) % capacity_;
-            size_t crc_count = 2 + len_byte;
-            
-            for (size_t i = 0; i < crc_count; ++i) {
-                uint8_t byte = ring_buffer_[(crc_start_idx + i) % capacity_];
-                calc_crc = CRC8_TABLE[calc_crc ^ byte];
+            // 校验: 在环形缓冲区上直接计算
+            bool checksum_ok;
+            if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
+                checksum_ok = true;
+            } else {
+                size_t cs_start = (tail_ + 2) % capacity_;
+                size_t cs_count = 2 + len_byte;
+                uint8_t calc_cs = calculate_checksum_from_ring(ring_buffer_, capacity_, cs_start, cs_count);
+                uint8_t recv_cs = ring_buffer_[(tail_ + total_len - 1) % capacity_];
+                checksum_ok = (calc_cs == recv_cs);
             }
             
-            uint8_t recv_crc = ring_buffer_[(tail_ + total_len - 1) % capacity_];
-            
-            if (calc_crc == recv_crc) {
-                 // 有效数据包
+            if (checksum_ok) {
                  out_packet.id = static_cast<PacketID>(id_byte);
                  out_packet.payload.resize(len_byte);
                  
-                 // 复制载荷
                  size_t payload_start = (tail_ + 4) % capacity_;
                  for (size_t i = 0; i < len_byte; ++i) {
                      out_packet.payload[i] = ring_buffer_[(payload_start + i) % capacity_];
                  }
                  
-                 // 消耗数据包
                  tail_ = (tail_ + total_len) % capacity_;
+                 rx_packet_count_++;
                  return true;
             } else {
-                 // CRC 无效，仅丢弃帧头的第一个字节以重新搜索 (也许 0xA5 是下一个头的开始?)
-                 // 实际上严格来说如果我们匹配了 0x5A 0xA5 但CRC失败，这可能是垃圾数据。
-                 // 但安全起见滑动 1 字节。
+                 crc_error_count_++;
                  tail_ = (tail_ + 1) % capacity_;
             }
             
