@@ -29,46 +29,49 @@ protected:
     PacketHandler handler{4096};
 };
 
-// 1. 未知 ID 测试
-TEST_F(EdgeCaseTest, UnknownID) {
-    uint8_t unknown_id = 0xFF;
+// 1. 未知 ID 应被拒绝，并且不会阻塞后续重同步
+TEST_F(EdgeCaseTest, UnknownIDIsRejectedAndResynced) {
+    uint8_t unknown_id = 0x7F;
     std::vector<uint8_t> data = {0x01, 0x02};
     std::vector<uint8_t> pkt = build_raw_frame(unknown_id, data);
+    std::vector<uint8_t> valid_pkt = handler.pack(PACKET_ID_HEARTBEAT, Packet_Heartbeat{100});
     
     handler.feed_data(pkt);
+    handler.feed_data(valid_pkt);
     Packet out;
     
-    // 应当作为有效帧解析成功。
-    // 应用逻辑 (分发器) 决定如何处理未知 ID。
-    // PacketHandler 仅确保帧有效性。
     ASSERT_TRUE(handler.parse_packet(out));
-    EXPECT_EQ(out.id, unknown_id);
+    EXPECT_EQ(out.id, PACKET_ID_HEARTBEAT);
+    EXPECT_EQ(out.as<Packet_Heartbeat>().count, 100u);
 }
 
-// 2. 零长度载荷测试
-TEST_F(EdgeCaseTest, ZeroLengthPayload) {
+// 2. 零长度载荷应被拒绝，并且不会阻塞后续重同步
+TEST_F(EdgeCaseTest, ZeroLengthPayloadIsRejectedAndResynced) {
     uint8_t test_id = 0xEE;
     std::vector<uint8_t> pkt = build_raw_frame(test_id, {});
+    std::vector<uint8_t> valid_pkt = handler.pack(PACKET_ID_HEARTBEAT, Packet_Heartbeat{101});
     
     handler.feed_data(pkt);
+    handler.feed_data(valid_pkt);
     Packet out;
     ASSERT_TRUE(handler.parse_packet(out));
-    EXPECT_EQ(out.id, test_id);
-    EXPECT_EQ(out.payload.size(), 0);
+    EXPECT_EQ(out.id, PACKET_ID_HEARTBEAT);
+    EXPECT_EQ(out.as<Packet_Heartbeat>().count, 101u);
 }
 
-// 3. 最大长度载荷 (255)
-TEST_F(EdgeCaseTest, MaxLengthPayload) {
+// 3. 超过协议最大长度的载荷应被拒绝，并且不会阻塞后续重同步
+TEST_F(EdgeCaseTest, PayloadLongerThanProtocolMaximumIsRejectedAndResynced) {
     uint8_t test_id = 0xEE;
     std::vector<uint8_t> data(255, 0xAB);
     std::vector<uint8_t> pkt = build_raw_frame(test_id, data);
+    std::vector<uint8_t> valid_pkt = handler.pack(PACKET_ID_HEARTBEAT, Packet_Heartbeat{102});
     
     handler.feed_data(pkt);
+    handler.feed_data(valid_pkt);
     Packet out;
     ASSERT_TRUE(handler.parse_packet(out));
-    EXPECT_EQ(out.payload.size(), 255);
-    EXPECT_EQ(out.payload[0], 0xAB);
-    EXPECT_EQ(out.payload[254], 0xAB);
+    EXPECT_EQ(out.id, PACKET_ID_HEARTBEAT);
+    EXPECT_EQ(out.as<Packet_Heartbeat>().count, 102u);
 }
 
 // 4. 损坏/部分数据包恢复

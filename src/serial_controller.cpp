@@ -3,6 +3,7 @@
 #include <iomanip>
 
 #include "auto_serial_bridge/serial_controller.hpp"
+#include "auto_serial_bridge/loopback_utils.hpp"
 #include "auto_serial_bridge/generated_bindings.hpp"
 #include "auto_serial_bridge/generated_config.hpp"
 #include "rclcpp_components/register_node_macro.hpp"
@@ -13,7 +14,9 @@ namespace auto_serial_bridge
       : Node("serial_controller", options),
         state_(config::REQUIRE_HANDSHAKE ? State::WAITING_HANDSHAKE : State::RUNNING),
         ctx_(std::make_shared<drivers::common::IoContext>(2)),
-        packet_handler_(auto_serial_bridge::config::BUFFER_SIZE)
+        packet_handler_(auto_serial_bridge::config::BUFFER_SIZE),
+        enable_heartbeat_(config::ENABLE_HEARTBEAT),
+        heartbeat_timeout_ms_(static_cast<int>(config::HEARTBEAT_TIMEOUT_MS))
   {
     RCLCPP_INFO(this->get_logger(), "Initializing SerialController...");
 
@@ -115,13 +118,8 @@ namespace auto_serial_bridge
     }
 
     const auto & rmw_info = info.get_rmw_message_info();
-    if ((*publisher) == &rmw_info.publisher_gid) {
-      return true;
-    }
-
-    // Intra-process deliveries do not preserve a stable publisher_gid in the
-    // MessageInfo payload, so treat mirrored topics as self-loopback in that mode.
-    return rmw_info.from_intra_process;
+    return should_skip_loopback_delivery(
+      publisher->get_gid(), rmw_info.publisher_gid, rmw_info.from_intra_process);
   }
 
   void SerialController::get_parameters()
@@ -129,16 +127,12 @@ namespace auto_serial_bridge
     this->declare_parameter<std::string>("port", "/dev/ttyUSB0");
     this->declare_parameter<int>("baudrate", auto_serial_bridge::config::DEFAULT_BAUDRATE);
     this->declare_parameter<double>("timeout", 0.1);
-    this->declare_parameter<bool>("enable_heartbeat", config::ENABLE_HEARTBEAT);
-    this->declare_parameter<int>("heartbeat_timeout_ms", static_cast<int>(config::HEARTBEAT_TIMEOUT_MS));
 
     this->get_parameter("port", port_);
     int baudrate_temp = auto_serial_bridge::config::DEFAULT_BAUDRATE;
     this->get_parameter("baudrate", baudrate_temp);
     baudrate_ = static_cast<uint32_t>(baudrate_temp);
     this->get_parameter("timeout", timeout_);
-    this->get_parameter("enable_heartbeat", enable_heartbeat_);
-    this->get_parameter("heartbeat_timeout_ms", heartbeat_timeout_ms_);
 
     RCLCPP_INFO(
         this->get_logger(),

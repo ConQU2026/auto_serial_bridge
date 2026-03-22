@@ -281,7 +281,7 @@ TEST(ChecksumAlgoTest, CorruptedPayloadRejected) {
 
 TEST(ChecksumAlgoTest, CrossAlgo_SUM8Frame) {
     PacketHandler handler(1024);
-    uint8_t id = 0xEE;
+    uint8_t id = PACKET_ID_GENERICSTATUSTX;
     std::vector<uint8_t> payload = {0x10, 0x20, 0x30};
 
     uint8_t sum8_cs = compute_ref_checksum(id, payload, ref_sum8);
@@ -301,7 +301,7 @@ TEST(ChecksumAlgoTest, CrossAlgo_SUM8Frame) {
 
 TEST(ChecksumAlgoTest, CrossAlgo_XOR8Frame) {
     PacketHandler handler(1024);
-    uint8_t id = 0xEE;
+    uint8_t id = PACKET_ID_GENERICSTATUSTX;
     std::vector<uint8_t> payload = {0xAA, 0xBB, 0xCC};
 
     uint8_t xor8_cs = compute_ref_checksum(id, payload, ref_xor8);
@@ -321,8 +321,8 @@ TEST(ChecksumAlgoTest, CrossAlgo_XOR8Frame) {
 #ifdef CHECKSUM_ALGO_CRC8
 TEST(ChecksumAlgoTest, CrossAlgo_CRC8Frame) {
     PacketHandler handler(1024);
-    uint8_t id = 0xEE;
-    std::vector<uint8_t> payload = {0x01, 0x02, 0x03, 0x04, 0x05};
+    uint8_t id = PACKET_ID_HEARTBEAT;
+    std::vector<uint8_t> payload = {0x01, 0x02, 0x03, 0x04};
 
     uint8_t crc8_cs = compute_ref_checksum(id, payload, ref_crc8);
     auto frame = build_raw_frame(id, payload, crc8_cs);
@@ -347,8 +347,8 @@ TEST(ChecksumAlgoTest, NoneAlgoAcceptsAnything) {
     if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
         for (uint8_t cs_byte : {0x00, 0x42, 0xFF}) {
             PacketHandler handler(1024);
-            std::vector<uint8_t> payload = {0x01, 0x02};
-            auto frame = build_raw_frame(0x01, payload, cs_byte);
+            std::vector<uint8_t> payload = {0x01, 0x02, 0x03};
+            auto frame = build_raw_frame(PACKET_ID_GENERICSTATUSTX, payload, cs_byte);
 
             handler.feed_data(frame);
             Packet pkt;

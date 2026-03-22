@@ -186,6 +186,7 @@ if(BUILD_TESTING)
     test/test_checksum_build_matrix.py
     TIMEOUT 600
   )
+  set_tests_properties(checksum_build_matrix PROPERTIES RUN_SERIAL TRUE)
 endif()
 
 # ==============================================================================

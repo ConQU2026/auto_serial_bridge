@@ -604,7 +604,7 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
         f.write("}\n") # namespace
         f.write("}\n") # namespace
 
-def generate_cpp_config(config, output_path):
+def generate_cpp_config(config, messages, type_mappings, output_path):
     """生成C++公共配置头文件。"""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -618,6 +618,7 @@ def generate_cpp_config(config, output_path):
         f.write("#pragma once\n")
         f.write("#include <cstdint>\n")
         f.write("#include <cstddef>\n\n")
+        f.write("#include \"protocol.h\"\n\n")
         f.write("namespace auto_serial_bridge {\n")
         f.write("namespace config {\n\n")
 
@@ -634,6 +635,18 @@ def generate_cpp_config(config, output_path):
         f.write(f"    constexpr bool ENABLE_HEARTBEAT = {'true' if enable_heartbeat else 'false'};\n")
         f.write(f"    constexpr size_t QOS_DEPTH = {qos_depth};\n")
         f.write(f"    constexpr int HEARTBEAT_TIMEOUT_MS = {heartbeat_timeout_ms};\n")
+        max_payload_size = max(
+            sum(_C_TYPE_SIZES.get(get_c_type(field['type'], type_mappings), 1) for field in msg['fields'])
+            for msg in messages
+        )
+        f.write(f"    constexpr size_t MAX_PACKET_PAYLOAD_SIZE = {max_payload_size};\n\n")
+        f.write("    inline constexpr size_t expected_payload_size(PacketID id) {\n")
+        f.write("        switch (id) {\n")
+        for msg in messages:
+            f.write(f"            case PACKET_ID_{msg['name'].upper()}: return sizeof(Packet_{msg['name']});\n")
+        f.write("            default: return 0;\n")
+        f.write("        }\n")
+        f.write("    }\n")
 
         f.write("\n}\n")
         f.write("}\n")
@@ -888,7 +901,7 @@ def main():
     generate_mcu_source(config_data['config'], config_data['messages'], 
                         mcu_source_path, source_user_blocks, generated_at)
                         
-    generate_cpp_config(config_data['config'],
+    generate_cpp_config(config_data['config'], config_data['messages'], config_data['type_mappings'],
                         os.path.join(output_dir, 'include', 'auto_serial_bridge', 'generated_config.hpp'))
                         
     generate_ros_bindings(config_data['messages'], config_data['type_mappings'],

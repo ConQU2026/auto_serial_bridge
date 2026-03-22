@@ -1,13 +1,13 @@
-# 0. ROS2 参数配置 
+# 0. ROS2 参数配置
 serial_controller:
   ros__parameters:
     port: "/dev/stm32"
-    baudrate: &baudrate 115200
+    baudrate: 115200
     timeout: 0.1
 
 # 1. 全局配置
 config:
-  baudrate: *baudrate
+  baudrate: 115200
   buffer_size: 256
   head_byte_1: 0x5A      # 双帧头 1
   head_byte_2: 0xA5      # 双帧头 2

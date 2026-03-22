@@ -228,13 +228,16 @@ def calculate_checksum(data):
     raise ValueError(f"Unsupported checksum algorithm in protocol config: {algo}")
 
 
-def create_test_description(node_parameters):
+def create_test_description(node_parameters=None):
     if not RUN_PTY_INTEGRATION:
         pytest.skip(
             "PTY launch/integration test is opt-in. "
             "Set AUTO_SERIAL_BRIDGE_RUN_PTY_INTEGRATION=1 to run it.",
             allow_module_level=True,
         )
+
+    if node_parameters is None:
+        node_parameters = {}
 
     for link_path in ("/tmp/vtty0", "/tmp/vtty1"):
         try:

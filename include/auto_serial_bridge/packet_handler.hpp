@@ -33,6 +33,34 @@ namespace auto_serial_bridge
     uint32_t crc_error_count_ = 0;
     uint32_t rx_packet_count_ = 0;
 
+    static uint8_t calculate_checksum_from_ring(
+        const std::vector<uint8_t> & ring_buffer,
+        size_t capacity,
+        size_t start,
+        size_t count)
+    {
+      uint8_t checksum = 0;
+      for (size_t i = 0; i < count; ++i) {
+        const uint8_t byte = ring_buffer[(start + i) % capacity];
+        if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
+          (void)byte;
+          checksum = 0x00;
+        } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::SUM8) {
+          checksum += byte;
+        } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::XOR8) {
+          checksum ^= byte;
+        } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::CRC8) {
+#ifdef CHECKSUM_ALGO_CRC8
+          checksum = CRC8_TABLE[checksum ^ byte];
+#else
+          static_assert(config::CHECKSUM_ALGO != config::ChecksumAlgo::CRC8,
+                        "CRC8 selected but CRC8_TABLE is not available");
+#endif
+        }
+      }
+      return checksum;
+    }
+
   public:
     explicit PacketHandler(size_t buffer_size) : capacity_(buffer_size + 1)
     {
@@ -166,6 +194,23 @@ namespace auto_serial_bridge
             uint8_t len_byte = ring_buffer_[(tail_ + 3) % capacity_];
             
             size_t total_len = 2 + 1 + 1 + len_byte + 1; // Header(2) + ID(1) + Len(1) + Payload(N) + CRC(1)
+
+            if (total_len > capacity_ - 1) {
+                // 当前候选帧即使完整到达也无法驻留在环形缓冲区中，只能丢弃头字节后重同步。
+                tail_ = (tail_ + 1) % capacity_;
+                continue;
+            }
+
+            if (len_byte > config::MAX_PACKET_PAYLOAD_SIZE) {
+                tail_ = (tail_ + 1) % capacity_;
+                continue;
+            }
+
+            const size_t expected_len = config::expected_payload_size(static_cast<PacketID>(id_byte));
+            if (expected_len == 0 || len_byte != expected_len) {
+                tail_ = (tail_ + 1) % capacity_;
+                continue;
+            }
             
             if (data_available() < total_len) return false; // 等待完整数据包
             
@@ -174,14 +219,9 @@ namespace auto_serial_bridge
             if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
                 checksum_ok = true;
             } else {
-                // 线性化 ID+Len+Payload 到临时缓冲区
                 size_t cs_start = (tail_ + 2) % capacity_;
                 size_t cs_count = 2 + len_byte;
-                std::vector<uint8_t> cs_buf(cs_count);
-                for (size_t i = 0; i < cs_count; ++i) {
-                    cs_buf[i] = ring_buffer_[(cs_start + i) % capacity_];
-                }
-                uint8_t calc_cs = calculate_checksum(cs_buf.data(), cs_count);
+                uint8_t calc_cs = calculate_checksum_from_ring(ring_buffer_, capacity_, cs_start, cs_count);
                 uint8_t recv_cs = ring_buffer_[(tail_ + total_len - 1) % capacity_];
                 checksum_ok = (calc_cs == recv_cs);
             }

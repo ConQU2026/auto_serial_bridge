@@ -60,7 +60,7 @@ sudo ./auto_udev.sh
 cp config/protocol-sample.yaml config/protocol.yaml
 ```
 
-核心配置文件位于 `config/protocol.yaml`。可通过修改此文件来增删改数据协议，**修改后重新编译即可生效**。如果缺少该文件，真实 `colcon build` 会直接失败。
+核心配置文件位于 `config/protocol.yaml`。可通过修改此文件来增删改数据协议，**修改后重新编译即可生效**。如果缺少该文件，真实 `colcon build` 会直接失败。修改 `config/protocol.yaml` 后必须重新 `colcon build`，否则 launch 读到的仍然是 install 目录里的旧值。
 
 当前仓库的构建触发契约如下：
 
@@ -70,16 +70,16 @@ cp config/protocol-sample.yaml config/protocol.yaml
 
 #### 参数配置
 ```yaml
-# ROS2 参数配置 
+# ROS2 参数配置
 serial_controller:
   ros__parameters:
     port: "/dev/stm32"
-    baudrate: &baudrate 115200
+    baudrate: 115200
     timeout: 0.1
 
 # 全局配置
 config:
-  baudrate: *baudrate
+  baudrate: 115200
   buffer_size: 256
   head_byte_1: 0x5A      # 双帧头 1
   head_byte_2: 0xA5      # 双帧头 2

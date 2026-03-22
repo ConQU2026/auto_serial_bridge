@@ -10,11 +10,16 @@ from pty_test_utils import (
 
 
 pytestmark = PYTESTMARK_SKIP_IF_NO_PTY
+if PROTOCOL_CONFIG.get("config", {}).get("enable_heartbeat", True):
+    pytestmark = [
+        PYTESTMARK_SKIP_IF_NO_PTY,
+        pytest.mark.skip(reason="Heartbeat-disabled PTY coverage now requires a protocol.yaml built with enable_heartbeat=false."),
+    ]
 
 
 @pytest.mark.launch_test
 def generate_test_description():
-    return create_test_description({"enable_heartbeat": False})
+    return create_test_description()
 
 
 class TestSerialControllerHeartbeatDisabled(SerialControllerPtyTestCase):

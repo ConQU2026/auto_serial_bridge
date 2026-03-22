@@ -17,7 +17,7 @@ pytestmark = PYTESTMARK_SKIP_IF_NO_PTY
 
 @pytest.mark.launch_test
 def generate_test_description():
-    return create_test_description({"enable_heartbeat": True})
+    return create_test_description()
 
 class TestSerialController(SerialControllerPtyTestCase):
     def test_communication(self):
