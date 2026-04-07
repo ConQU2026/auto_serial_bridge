@@ -18,7 +18,7 @@ namespace config {
     constexpr bool REQUIRE_HANDSHAKE = true;
     constexpr bool ENABLE_HEARTBEAT = true;
     constexpr size_t QOS_DEPTH = 10;
-    constexpr int HEARTBEAT_TIMEOUT_MS = 3000;
+    constexpr int HEARTBEAT_TIMEOUT_MS = 10000;
     constexpr size_t MAX_PACKET_PAYLOAD_SIZE = 16;
 
     inline constexpr size_t expected_payload_size(PacketID id) {

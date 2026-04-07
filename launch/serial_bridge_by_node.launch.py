@@ -21,7 +21,12 @@ def generate_launch_description():
         name='serial_controller',
         output='screen',
         emulate_tty=True,
-        parameters=[node_params]
+        parameters=[node_params],
+        arguments=[
+            '--ros-args',
+            '--log-level', 'info',
+            '--log-level', 'serial_controller:=debug'
+        ]
     )
     
     ld = LaunchDescription()
