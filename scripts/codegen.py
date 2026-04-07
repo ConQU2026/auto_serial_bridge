@@ -537,6 +537,35 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
                     f.write(f"            pkt.{field['proto']} = {read_expr};\n")
                 
                 f.write(f"            node->send_packet(PACKET_ID_{msg['name'].upper()}, pkt);\n")
+                if msg['name'] != 'CmdVel':
+                    fmt_parts = []
+                    arg_parts = []
+                    for field in msg['fields']:
+                        field_name = field['proto']
+                        field_type = str(field.get('type', '')).lower()
+                        if field_type.startswith('f'):
+                            fmt_parts.append(f"{field_name}=%.3f")
+                            arg_parts.append(f"static_cast<double>(pkt.{field_name})")
+                        elif field_type.startswith('u'):
+                            fmt_parts.append(f"{field_name}=%u")
+                            arg_parts.append(f"static_cast<unsigned int>(pkt.{field_name})")
+                        elif field_type.startswith('i'):
+                            fmt_parts.append(f"{field_name}=%d")
+                            arg_parts.append(f"static_cast<int>(pkt.{field_name})")
+                        else:
+                            fmt_parts.append(f"{field_name}=%d")
+                            arg_parts.append(f"static_cast<int>(pkt.{field_name})")
+
+                    if fmt_parts:
+                        fmt_str = ", ".join(fmt_parts)
+                        args_str = ", ".join(arg_parts)
+                        f.write(
+                            f"            RCLCPP_DEBUG(node->get_logger(), \"TX {msg['name']}: {fmt_str}\", {args_str});\n"
+                        )
+                    else:
+                        f.write(
+                            f"            RCLCPP_DEBUG(node->get_logger(), \"TX {msg['name']}\");\n"
+                        )
                 f.write(f"        }}));\n")
                 f.write("\n")
 
@@ -571,7 +600,7 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
         f.write("};\n\n")
 
         # 消息分发函数
-        f.write("inline void dispatch_packet(ProtocolPublishers& pubs, uint8_t id, const std::vector<uint8_t>& data) {\n")
+        f.write("inline void dispatch_packet(ProtocolPublishers& pubs, uint8_t id, const std::vector<uint8_t>& data, const rclcpp::Logger& logger) {\n")
         f.write("    switch(id) {\n")
         for msg in messages:
             if msg['direction'] == 'rx' or msg['direction'] == 'both':
@@ -592,6 +621,35 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
                      f.write(f"            {expr}.resize({required_size});\n")
                 for field, write_expr in field_writes:
                      f.write(f"            {write_expr} = pkt->{field['proto']};\n")
+
+                fmt_parts = []
+                arg_parts = []
+                for field in msg['fields']:
+                    field_name = field['proto']
+                    field_type = str(field.get('type', '')).lower()
+                    if field_type.startswith('f'):
+                        fmt_parts.append(f"{field_name}=%.3f")
+                        arg_parts.append(f"static_cast<double>(pkt->{field_name})")
+                    elif field_type.startswith('u'):
+                        fmt_parts.append(f"{field_name}=%u")
+                        arg_parts.append(f"static_cast<unsigned int>(pkt->{field_name})")
+                    elif field_type.startswith('i'):
+                        fmt_parts.append(f"{field_name}=%d")
+                        arg_parts.append(f"static_cast<int>(pkt->{field_name})")
+                    else:
+                        fmt_parts.append(f"{field_name}=%d")
+                        arg_parts.append(f"static_cast<int>(pkt->{field_name})")
+
+                if fmt_parts:
+                    fmt_str = ", ".join(fmt_parts)
+                    args_str = ", ".join(arg_parts)
+                    f.write(
+                        f"            RCLCPP_DEBUG(logger, \"RX {msg['name']}: {fmt_str}\", {args_str});\n"
+                    )
+                else:
+                    f.write(
+                        f"            RCLCPP_DEBUG(logger, \"RX {msg['name']}\");\n"
+                    )
                 
                 f.write(f"            if (pubs.pub_{msg['name']}) {{\n")
                 f.write(f"                pubs.pub_{msg['name']}->publish(msg);\n")
