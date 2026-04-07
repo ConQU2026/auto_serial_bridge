@@ -30,8 +30,9 @@ messages:
   # 3.0 系统消息
   - name: "Heartbeat"
     id: 0x00
-    direction: "tx"
+    direction: "both"
     sub_topic: "/task/heartbeat"
+    pub_topic: "/task/heartbeat"
     ros_msg: "std_msgs/msg/UInt32"
     notes: "握手完成后，ROS 侧以固定周期下发心跳。电控收到后必须尽快原样回同一个 count 作为确认，但不再独立主动发送心跳。只有与 ROS 最近一次发送值一致的回包才算有效确认。"
     fields:
