@@ -79,6 +79,22 @@ def get_c_type(yaml_type, type_mappings):
         return type_mappings[yaml_type]
     return yaml_type  # 兜底返回
 
+
+def message_payload_size(message, type_mappings):
+    """计算协议结构体 payload 大小，不含 reliable seq。"""
+    return sum(
+        _C_TYPE_SIZES.get(get_c_type(field['type'], type_mappings), 1)
+        for field in message['fields']
+    )
+
+
+def message_wire_payload_size(message, type_mappings):
+    """计算链路上传输的 payload 大小，reliable 消息额外包含 1 字节 seq。"""
+    base_size = message_payload_size(message, type_mappings)
+    if message.get('reliable', False):
+        return base_size + 1
+    return base_size
+
 def extract_user_code(file_path):
     """Extract user code blocks from an existing file.
     
@@ -253,13 +269,9 @@ def generate_mcu_source(config, messages, type_mappings, output_path, user_block
         # --- 1. 计算 MCU 端解析缓冲区大小 ---
         # rx_buffer 仅用于暂存当前正在解析的单个包的 payload，
         # 无需使用 ROS 端的环形缓冲区大小。reliable 包会追加 1 字节 seq。
-        has_reliable = any(m.get('reliable', False) for m in messages)
-        max_payload = max(
-            sum(_C_TYPE_SIZES.get(get_c_type(field['type'], type_mappings), 1)
-                for field in msg['fields'])
-            for msg in messages
-        )
-        mcu_rx_buf_size = max_payload + (1 if has_reliable else 0)
+        max_struct_payload = max(message_payload_size(msg, type_mappings) for msg in messages)
+        max_wire_payload = max(message_wire_payload_size(msg, type_mappings) for msg in messages)
+        mcu_rx_buf_size = max_wire_payload
 
         # --- 2. 定义解析器状态机 + 校验函数 ---
         f.write(f"""
@@ -273,7 +285,7 @@ typedef enum {{
     STATE_WAIT_CRC
 }} State;
 
-// 单包 payload 解析缓冲区 (最大 payload={max_payload} + reliable seq={1 if has_reliable else 0})
+// 单包 payload 解析缓冲区 (最大结构体 payload={max_struct_payload}, 最大 wire payload={max_wire_payload})
 static State rx_state = STATE_WAIT_HEADER1;
 static uint8_t rx_buffer[{mcu_rx_buf_size}];
 static uint16_t rx_cnt = 0;
@@ -860,16 +872,28 @@ def generate_cpp_config(config, messages, type_mappings, output_path):
         f.write(f"    constexpr int HEARTBEAT_TIMEOUT_MS = {heartbeat_timeout_ms};\n")
         f.write(f"    constexpr int RELIABLE_RETRY_INTERVAL_MS = {reliable_retry_interval_ms};\n")
         f.write(f"    constexpr int RELIABLE_MAX_RETRIES = {reliable_max_retries};\n")
-        max_payload_size = max(
-            sum(_C_TYPE_SIZES.get(get_c_type(field['type'], type_mappings), 1) for field in msg['fields'])
-            for msg in messages
-        )
+        max_payload_size = max(message_wire_payload_size(msg, type_mappings) for msg in messages)
         f.write(f"    constexpr size_t MAX_PACKET_PAYLOAD_SIZE = {max_payload_size};\n\n")
         f.write("    inline constexpr size_t expected_payload_size(PacketID id) {\n")
         f.write("        switch (id) {\n")
         for msg in messages:
-            f.write(f"            case PACKET_ID_{msg['name'].upper()}: return sizeof(Packet_{msg['name']});\n")
+            wire_size = message_wire_payload_size(msg, type_mappings)
+            if msg.get('reliable', False):
+                f.write(
+                    f"            case PACKET_ID_{msg['name'].upper()}: return sizeof(Packet_{msg['name']}) + 1;\n"
+                )
+            else:
+                f.write(f"            case PACKET_ID_{msg['name'].upper()}: return sizeof(Packet_{msg['name']});\n")
         f.write("            default: return 0;\n")
+        f.write("        }\n")
+        f.write("    }\n")
+        f.write("\n")
+        f.write("    inline constexpr bool is_reliable_packet(PacketID id) {\n")
+        f.write("        switch (id) {\n")
+        for msg in messages:
+            reliable = 'true' if msg.get('reliable', False) else 'false'
+            f.write(f"            case PACKET_ID_{msg['name'].upper()}: return {reliable};\n")
+        f.write("            default: return false;\n")
         f.write("        }\n")
         f.write("    }\n")
 

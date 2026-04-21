@@ -396,6 +396,12 @@ namespace auto_serial_bridge
       return;
     }
 
+    std::vector<uint8_t> dispatch_payload = pkt.payload;
+    if (config::is_reliable_packet(pkt.id) && !dispatch_payload.empty())
+    {
+      dispatch_payload.pop_back();
+    }
+
     if (pkt.id == PACKET_ID_HEARTBEAT && state_ == State::RUNNING && enable_heartbeat_)
     {
       if (pkt.payload.size() == sizeof(Packet_Heartbeat))
@@ -462,12 +468,12 @@ namespace auto_serial_bridge
       {
         process_handshake(pkt);
         auto_serial_bridge::generated::dispatch_packet(
-            *pubs, static_cast<uint8_t>(pkt.id), pkt.payload, this->get_logger());
+            *pubs, static_cast<uint8_t>(pkt.id), dispatch_payload, this->get_logger());
       }
       else if (state_ == State::RUNNING)
       {
         auto_serial_bridge::generated::dispatch_packet(
-            *pubs, static_cast<uint8_t>(pkt.id), pkt.payload, this->get_logger());
+            *pubs, static_cast<uint8_t>(pkt.id), dispatch_payload, this->get_logger());
       }
       else
       {
@@ -486,7 +492,7 @@ namespace auto_serial_bridge
         process_handshake(pkt);
       }
       auto_serial_bridge::generated::dispatch_packet(
-          *pubs, static_cast<uint8_t>(pkt.id), pkt.payload, this->get_logger());
+          *pubs, static_cast<uint8_t>(pkt.id), dispatch_payload, this->get_logger());
     }
   }
 
@@ -559,7 +565,12 @@ namespace auto_serial_bridge
   void SerialController::async_send(const std::vector<uint8_t> &packet_bytes)
   {
     post_serial([this, packet_bytes]()
-                { async_send_impl(packet_bytes); });
+                {
+                  if (async_send_impl(packet_bytes))
+                  {
+                    tx_packet_count_++;
+                  }
+                });
   }
 
   bool SerialController::async_send_impl(const std::vector<uint8_t> &packet_bytes)

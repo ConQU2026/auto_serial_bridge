@@ -82,3 +82,14 @@ messages:
       - { proto: "linear_x",  type: "f32", ros: "linear.x" }
       - { proto: "linear_y",  type: "f32", ros: "linear.y" }
       - { proto: "angular_z", type: "f32", ros: "angular.z" }
+
+  - name: "DemoReliableCommand"
+    id: 0x02
+    direction: "tx"
+    debug_log_mode: "on_change"
+    reliable: true
+    sub_topic: "/demo/reliable_command"
+    ros_msg: "std_msgs/msg/UInt32"
+    notes: "中性的 reliable TX 示例。展示公开 sample 中可靠传输消息的最小配置，不绑定真实业务语义。"
+    fields:
+      - { proto: "value", type: "u32", ros: "data" }

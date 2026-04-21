@@ -616,7 +616,6 @@ def test_codegen_uses_size_t_checksum_signature_and_correct_buffer_sizes(tmpdir)
     assert 'uint8_t calculate_checksum(const uint8_t* data, size_t len);' in header
     assert 'uint8_t calculate_checksum(const uint8_t* data, size_t len) {' in source
     assert 'for (size_t i = 0; i < len; i++) {' in source
-    # MCU rx_buffer 基于 max payload 计算，不再使用 buffer_size
     assert 'static uint8_t rx_buffer[' in source
     match = re.search(r'static uint8_t rx_buffer\[(\d+)\];', source)
     assert match is not None, "MCU 源码中应包含 rx_buffer 定义"

@@ -23,7 +23,7 @@ namespace config {
     constexpr int HEARTBEAT_TIMEOUT_MS = 10000;
     constexpr int RELIABLE_RETRY_INTERVAL_MS = 100;
     constexpr int RELIABLE_MAX_RETRIES = 3;
-    constexpr size_t MAX_PACKET_PAYLOAD_SIZE = 16;
+    constexpr size_t MAX_PACKET_PAYLOAD_SIZE = 17;
 
     inline constexpr size_t expected_payload_size(PacketID id) {
         switch (id) {
@@ -31,15 +31,33 @@ namespace config {
             case PACKET_ID_HEARTBEAT: return sizeof(Packet_Heartbeat);
             case PACKET_ID_HANDSHAKE: return sizeof(Packet_Handshake);
             case PACKET_ID_CMDVEL: return sizeof(Packet_CmdVel);
-            case PACKET_ID_GRIPPERCONTROLGOAL: return sizeof(Packet_GripperControlGoal);
-            case PACKET_ID_WEAPONDOCKGOAL: return sizeof(Packet_WeaponDockGoal);
-            case PACKET_ID_MLCONTROLTX: return sizeof(Packet_MlControlTx);
-            case PACKET_ID_MERLINPICKGOAL: return sizeof(Packet_MerlinPickGoal);
-            case PACKET_ID_GRIDPLACEGOAL: return sizeof(Packet_GridPlaceGoal);
-            case PACKET_ID_GRIDATTACKGOAL: return sizeof(Packet_GridAttackGoal);
-            case PACKET_ID_GENERICSTATUSTX: return sizeof(Packet_GenericStatusTx);
+            case PACKET_ID_GRIPPERCONTROLGOAL: return sizeof(Packet_GripperControlGoal) + 1;
+            case PACKET_ID_WEAPONDOCKGOAL: return sizeof(Packet_WeaponDockGoal) + 1;
+            case PACKET_ID_MLCONTROLTX: return sizeof(Packet_MlControlTx) + 1;
+            case PACKET_ID_MERLINPICKGOAL: return sizeof(Packet_MerlinPickGoal) + 1;
+            case PACKET_ID_GRIDPLACEGOAL: return sizeof(Packet_GridPlaceGoal) + 1;
+            case PACKET_ID_GRIDATTACKGOAL: return sizeof(Packet_GridAttackGoal) + 1;
+            case PACKET_ID_GENERICSTATUSTX: return sizeof(Packet_GenericStatusTx) + 1;
             case PACKET_ID_GENERICSTATUSRX: return sizeof(Packet_GenericStatusRx);
             default: return 0;
+        }
+    }
+
+    inline constexpr bool is_reliable_packet(PacketID id) {
+        switch (id) {
+            case PACKET_ID_ACK: return false;
+            case PACKET_ID_HEARTBEAT: return false;
+            case PACKET_ID_HANDSHAKE: return false;
+            case PACKET_ID_CMDVEL: return false;
+            case PACKET_ID_GRIPPERCONTROLGOAL: return true;
+            case PACKET_ID_WEAPONDOCKGOAL: return true;
+            case PACKET_ID_MLCONTROLTX: return true;
+            case PACKET_ID_MERLINPICKGOAL: return true;
+            case PACKET_ID_GRIDPLACEGOAL: return true;
+            case PACKET_ID_GRIDATTACKGOAL: return true;
+            case PACKET_ID_GENERICSTATUSTX: return true;
+            case PACKET_ID_GENERICSTATUSRX: return false;
+            default: return false;
         }
     }
 

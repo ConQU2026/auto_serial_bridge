@@ -153,7 +153,6 @@ namespace auto_serial_bridge
     {
       auto bytes = packet_handler_.pack(id, data);
       async_send(bytes);
-      tx_packet_count_++;
     }
 
     template <typename T>

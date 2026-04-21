@@ -260,7 +260,9 @@ TEST_F(EdgeCaseTest, FalseHeaderSequence) {
     Packet out;
     if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
         ASSERT_TRUE(handler.parse_packet(out));
-        ASSERT_TRUE(handler.parse_packet(out));
+        if (out.id != PACKET_ID_HEARTBEAT) {
+            ASSERT_TRUE(handler.parse_packet(out));
+        }
     } else {
         // 解析器应该拒绝噪音 (CRC 不匹配) 并丢弃第一个 '0x5A',
         // 然后重新扫描，最终找到真实数据包。

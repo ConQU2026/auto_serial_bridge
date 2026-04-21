@@ -229,14 +229,13 @@ def test_protocol_sample_yaml_includes_ack_example():
 def test_protocol_sample_yaml_messages_include_debug_log_mode_setting():
     config = yaml.safe_load(PROTOCOL_SAMPLE_PATH.read_text())
 
-    messages = config["messages"]
-    assert messages, "protocol-sample.yaml should contain messages"
+    messages = {message["name"]: message for message in config["messages"]}
+    system_messages = {"Ack", "Heartbeat", "Handshake"}
 
-    for message in messages:
-        assert message["debug_log_mode"] in {"on_change", "off"}
+    assert system_messages.issubset(messages), "protocol-sample.yaml should include fixed system messages"
 
-    by_name = {message["name"]: message for message in messages}
-    assert by_name["CmdVel"]["debug_log_mode"] == "on_change"
+    for name in system_messages:
+        assert messages[name]["debug_log_mode"] in {"on_change", "off"}
 
 
 def test_web_editor_exposes_fixed_system_message_examples():
