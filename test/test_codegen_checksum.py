@@ -598,7 +598,12 @@ def test_message_debug_log_mode_invalid_value_fails_codegen(tmpdir):
     assert 'invalid debug_log_mode' in combined_output
 
 
-def test_codegen_uses_size_t_checksum_signature_and_buffer_size_1024(tmpdir):
+def test_codegen_uses_size_t_checksum_signature_and_correct_buffer_sizes(tmpdir):
+    """验证 codegen 生成的校验函数签名和缓冲区大小。
+
+    MCU 端 rx_buffer 基于实际 max payload 计算（非 ROS 端 buffer_size），
+    ROS 端 BUFFER_SIZE 保持 yaml 中配置的值。
+    """
     cfg = _load_sample_config()
 
     result = _run_codegen(cfg, tmpdir)
@@ -611,7 +616,15 @@ def test_codegen_uses_size_t_checksum_signature_and_buffer_size_1024(tmpdir):
     assert 'uint8_t calculate_checksum(const uint8_t* data, size_t len);' in header
     assert 'uint8_t calculate_checksum(const uint8_t* data, size_t len) {' in source
     assert 'for (size_t i = 0; i < len; i++) {' in source
-    assert 'static uint8_t rx_buffer[1024];' in source
+    # MCU rx_buffer 基于 max payload 计算，不再使用 buffer_size
+    assert 'static uint8_t rx_buffer[' in source
+    match = re.search(r'static uint8_t rx_buffer\[(\d+)\];', source)
+    assert match is not None, "MCU 源码中应包含 rx_buffer 定义"
+    mcu_buf_size = int(match.group(1))
+    assert mcu_buf_size < 64, (
+        f"MCU rx_buffer 应基于 max payload 计算，"
+        f"不应为 ROS 端 buffer_size; got {mcu_buf_size}"
+    )
     assert 'constexpr size_t BUFFER_SIZE = 1024;' in cpp_cfg
 
 
