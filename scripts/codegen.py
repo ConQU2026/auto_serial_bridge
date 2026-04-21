@@ -226,9 +226,18 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
             f.write("};\n")
 
 
-def generate_mcu_source(config, messages, output_path, user_blocks, generated_at):
+def generate_mcu_source(config, messages, type_mappings, output_path, user_blocks, generated_at):
+    """生成MCU端使用的C语言源文件。
+
+    Args:
+        config: 全局配置字典。
+        messages: 消息定义列表。
+        type_mappings: 类型映射字典，用于计算字段字节大小。
+        output_path: 输出文件路径。
+        user_blocks: 已提取的用户代码块。
+        generated_at: 生成时间戳字符串。
+    """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    buffer_size = config.get('buffer_size', 1024)
     checksum_algo = config.get('checksum', 'CRC8').upper()
     require_handshake = config.get('require_handshake', True)
     ignore_version_mismatch = config.get('ignore_version_mismatch', True)
@@ -241,7 +250,18 @@ def generate_mcu_source(config, messages, output_path, user_blocks, generated_at
         f.write(render_block(user_blocks, "Includes"))
         f.write("\n")
         
-        # --- 1. 定义解析器状态机 + 校验函数 ---
+        # --- 1. 计算 MCU 端解析缓冲区大小 ---
+        # rx_buffer 仅用于暂存当前正在解析的单个包的 payload，
+        # 无需使用 ROS 端的环形缓冲区大小。reliable 包会追加 1 字节 seq。
+        has_reliable = any(m.get('reliable', False) for m in messages)
+        max_payload = max(
+            sum(_C_TYPE_SIZES.get(get_c_type(field['type'], type_mappings), 1)
+                for field in msg['fields'])
+            for msg in messages
+        )
+        mcu_rx_buf_size = max_payload + (1 if has_reliable else 0)
+
+        # --- 2. 定义解析器状态机 + 校验函数 ---
         f.write(f"""
 // 解析器状态定义
 typedef enum {{
@@ -253,8 +273,9 @@ typedef enum {{
     STATE_WAIT_CRC
 }} State;
 
+// 单包 payload 解析缓冲区 (最大 payload={max_payload} + reliable seq={1 if has_reliable else 0})
 static State rx_state = STATE_WAIT_HEADER1;
-static uint8_t rx_buffer[{buffer_size}]; // 定义的最大包长
+static uint8_t rx_buffer[{mcu_rx_buf_size}];
 static uint16_t rx_cnt = 0;
 static uint8_t rx_data_len = 0;
 static uint8_t rx_id = 0;
@@ -1140,7 +1161,7 @@ def main():
     mcu_source_path = os.path.join(output_dir, 'mcu_output', 'protocol.c')
     source_user_blocks = extract_user_code(mcu_source_path)
     
-    generate_mcu_source(config_data['config'], config_data['messages'], 
+    generate_mcu_source(config_data['config'], config_data['messages'], config_data['type_mappings'],
                         mcu_source_path, source_user_blocks, generated_at)
                         
     generate_cpp_config(config_data['config'], config_data['messages'], config_data['type_mappings'],
