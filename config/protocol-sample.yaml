@@ -8,14 +8,18 @@ serial_controller:
 # 1. 全局配置
 config:
   baudrate: 115200
-  buffer_size: 256
+  buffer_size: 1024
   head_byte_1: 0x5A      # 双帧头 1
   head_byte_2: 0xA5      # 双帧头 2
   checksum: "CRC8"              # 校验算法, 可选: NONE, SUM8, XOR8, CRC8
   require_handshake: true       # false = 跳过握手, 上电直接进入 RUNNING, 握手内容为配置文件hash
+  ignore_version_mismatch: true # true = hash 不一致时也允许进入 RUNNING
   enable_heartbeat: true        # false = 不发送 Heartbeat, 也不做 ACK 断连检测
+  strict_heartbeat: true        # true = 超时直接断连, false = 仅 WARN 不断连
+  reliable_retry_interval_ms: 100
+  reliable_max_retries: 3
   qos_depth: 10                 
-  heartbeat_timeout_ms: 3000    # 心跳确认超时毫秒数 (0 = 不检测)
+  heartbeat_timeout_ms: 3000    # (0 = 不检测)
 
 # 2. 类型映射
 type_mappings:
@@ -27,10 +31,25 @@ type_mappings:
 
 messages:
 
-  # 3.0 系统消息
-  - name: "Heartbeat"
-    id: 0x00
+  # ============================================================
+  # 系统消息 (必需, 请勿删除或修改 ID)
+  # ============================================================
+  - name: "Ack"
+    id: 0xFD
     direction: "both"
+    debug_log_mode: "on_change"
+    sub_topic: "/task/ack"
+    pub_topic: "/task/ack"
+    ros_msg: "std_msgs/msg/Int32MultiArray"
+    notes: "通用 ACK。acked_id 为被确认包的原始 Packet ID，ack_seq 为发送方附加的序列号，用于区分同 ID 的不同版本。"
+    fields:
+      - { proto: "acked_id", type: "u8", ros: "data[0]" }
+      - { proto: "ack_seq",  type: "u8", ros: "data[1]" }
+
+  - name: "Heartbeat"
+    id: 0xFE
+    direction: "both"
+    debug_log_mode: "on_change"
     sub_topic: "/task/heartbeat"
     pub_topic: "/task/heartbeat"
     ros_msg: "std_msgs/msg/UInt32"
@@ -41,6 +60,7 @@ messages:
   - name: "Handshake"
     id: 0xFF
     direction: "both"
+    debug_log_mode: "on_change"
     sub_topic: "/task/handshake"
     pub_topic: "/task/handshake"
     ros_msg: "std_msgs/msg/UInt32"
@@ -48,14 +68,28 @@ messages:
     fields:
       - { proto: "protocol_hash", type: "u32", ros: "data" }
 
-
+  # ============================================================
+  # 自定义消息
+  # ============================================================
   # 底盘移动控制
   - name: "CmdVel"
     id: 0x01
     direction: "tx"
+    debug_log_mode: "on_change"
     sub_topic: "/cmd_vel"
     ros_msg: "geometry_msgs/msg/Twist"
     fields:
       - { proto: "linear_x",  type: "f32", ros: "linear.x" }
       - { proto: "linear_y",  type: "f32", ros: "linear.y" }
       - { proto: "angular_z", type: "f32", ros: "angular.z" }
+
+  - name: "DemoReliableCommand"
+    id: 0x02
+    direction: "tx"
+    debug_log_mode: "on_change"
+    reliable: true
+    sub_topic: "/demo/reliable_command"
+    ros_msg: "std_msgs/msg/UInt32"
+    notes: "中性的 reliable TX 示例。展示公开 sample 中可靠传输消息的最小配置，不绑定真实业务语义。"
+    fields:
+      - { proto: "value", type: "u32", ros: "data" }

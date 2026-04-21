@@ -19,6 +19,12 @@ if PROTOCOL_CONFIG.get("config", {}).get("enable_heartbeat", True):
 
 @pytest.mark.launch_test
 def generate_test_description():
+    if PROTOCOL_CONFIG.get("config", {}).get("enable_heartbeat", True):
+        pytest.skip(
+            "Heartbeat-disabled PTY coverage requires protocol.yaml with enable_heartbeat=false.",
+            allow_module_level=True,
+        )
+
     return create_test_description()
 
 

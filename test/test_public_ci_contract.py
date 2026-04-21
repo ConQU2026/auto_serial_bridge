@@ -16,6 +16,8 @@ NODE_LAUNCH_PATH = REPO_ROOT / "launch" / "serial_bridge_by_node.launch.py"
 COMPONENT_LAUNCH_PATH = REPO_ROOT / "launch" / "serial_bridge_by_component.launch.py"
 PROTOCOL_SAMPLE_PATH = REPO_ROOT / "config" / "protocol-sample.yaml"
 RUNTIME_PARAMS_PATH = REPO_ROOT / "config" / "runtime_params.yaml"
+WEB_APP_PATH = REPO_ROOT / "web" / "app.js"
+WEB_INDEX_PATH = REPO_ROOT / "web" / "index.html"
 
 
 def _workflow_run_script() -> str:
@@ -208,6 +210,43 @@ def test_readme_protocol_example_keeps_runtime_ros_section_in_protocol_yaml():
     assert "ros__parameters:" in readme
     assert "&baudrate" not in readme
     assert "*baudrate" not in readme
+
+
+def test_protocol_sample_yaml_includes_ack_example():
+    config = yaml.safe_load(PROTOCOL_SAMPLE_PATH.read_text())
+
+    messages = {message["name"]: message for message in config["messages"]}
+    ack = messages["Ack"]
+
+    assert ack["id"] == 0xFD
+    assert ack["direction"] == "both"
+    assert ack["sub_topic"] == "/task/ack"
+    assert ack["pub_topic"] == "/task/ack"
+    assert ack["ros_msg"] == "std_msgs/msg/Int32MultiArray"
+    assert [field["proto"] for field in ack["fields"]] == ["acked_id", "ack_seq"]
+
+
+def test_protocol_sample_yaml_messages_include_debug_log_mode_setting():
+    config = yaml.safe_load(PROTOCOL_SAMPLE_PATH.read_text())
+
+    messages = {message["name"]: message for message in config["messages"]}
+    system_messages = {"Ack", "Heartbeat", "Handshake"}
+
+    assert system_messages.issubset(messages), "protocol-sample.yaml should include fixed system messages"
+
+    for name in system_messages:
+        assert messages[name]["debug_log_mode"] in {"on_change", "off"}
+
+
+def test_web_editor_exposes_fixed_system_message_examples():
+    app_js = WEB_APP_PATH.read_text()
+    index_html = WEB_INDEX_PATH.read_text()
+
+    assert "const SYSTEM_MESSAGES = Object.freeze([" in app_js
+    assert 'name: "Ack"' in app_js
+    assert 'name: "Heartbeat"' in app_js
+    assert 'name: "Handshake"' in app_js
+    assert "系统消息（Ack/Heartbeat/Handshake）固定" in index_html
 
 
 def test_serial_controller_does_not_expose_heartbeat_runtime_overrides():

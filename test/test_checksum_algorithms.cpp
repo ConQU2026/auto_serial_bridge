@@ -190,13 +190,13 @@ TEST(ChecksumAlgoTest, PackChecksumByteCorrect_Handshake) {
     EXPECT_EQ(bytes.back(), expect_cs);
 }
 
-TEST(ChecksumAlgoTest, PackChecksumByteCorrect_CmdVel) {
+TEST(ChecksumAlgoTest, PackChecksumByteCorrect_Heartbeat2) {
     PacketHandler handler(1024);
 
-    Packet_CmdVel cmd = {1.0f, -2.0f, 0.5f};
-    auto bytes = handler.pack(PACKET_ID_CMDVEL, cmd);
+    Packet_Heartbeat hb = {0xCAFE0001};
+    auto bytes = handler.pack(PACKET_ID_HEARTBEAT, hb);
 
-    EXPECT_EQ(bytes.size(), 17u); // 2+1+1+12+1
+    EXPECT_EQ(bytes.size(), 9u); // 2+1+1+4+1
     uint8_t expect_cs = PacketHandler::calculate_checksum(bytes.data() + 2, bytes.size() - 3);
     EXPECT_EQ(bytes.back(), expect_cs);
 }
@@ -229,20 +229,16 @@ TEST(ChecksumAlgoTest, RoundTrip_Handshake) {
     EXPECT_EQ(pkt.as<Packet_Handshake>().protocol_hash, PROTOCOL_HASH);
 }
 
-TEST(ChecksumAlgoTest, RoundTrip_CmdVel) {
+TEST(ChecksumAlgoTest, RoundTrip_Heartbeat2) {
     PacketHandler handler(1024);
-    Packet_CmdVel in = {3.14f, -1.57f, 0.01f};
-    auto bytes = handler.pack(PACKET_ID_CMDVEL, in);
+    Packet_Heartbeat in = {0x12345678};
+    auto bytes = handler.pack(PACKET_ID_HEARTBEAT, in);
 
     handler.feed_data(bytes);
     Packet pkt;
     ASSERT_TRUE(handler.parse_packet(pkt));
-    EXPECT_EQ(pkt.id, PACKET_ID_CMDVEL);
-
-    auto out = pkt.as<Packet_CmdVel>();
-    EXPECT_FLOAT_EQ(out.linear_x, 3.14f);
-    EXPECT_FLOAT_EQ(out.linear_y, -1.57f);
-    EXPECT_FLOAT_EQ(out.angular_z, 0.01f);
+    EXPECT_EQ(pkt.id, PACKET_ID_HEARTBEAT);
+    EXPECT_EQ(pkt.as<Packet_Heartbeat>().count, 0x12345678u);
 }
 
 // ============================================================================
@@ -281,8 +277,8 @@ TEST(ChecksumAlgoTest, CorruptedPayloadRejected) {
 
 TEST(ChecksumAlgoTest, CrossAlgo_SUM8Frame) {
     PacketHandler handler(1024);
-    uint8_t id = PACKET_ID_GENERICSTATUSTX;
-    std::vector<uint8_t> payload = {0x10, 0x20, 0x30};
+    uint8_t id = PACKET_ID_HEARTBEAT;
+    std::vector<uint8_t> payload = {0x10, 0x20, 0x30, 0x40};
 
     uint8_t sum8_cs = compute_ref_checksum(id, payload, ref_sum8);
     auto frame = build_raw_frame(id, payload, sum8_cs);
@@ -301,8 +297,8 @@ TEST(ChecksumAlgoTest, CrossAlgo_SUM8Frame) {
 
 TEST(ChecksumAlgoTest, CrossAlgo_XOR8Frame) {
     PacketHandler handler(1024);
-    uint8_t id = PACKET_ID_GENERICSTATUSTX;
-    std::vector<uint8_t> payload = {0xAA, 0xBB, 0xCC};
+    uint8_t id = PACKET_ID_HEARTBEAT;
+    std::vector<uint8_t> payload = {0xAA, 0xBB, 0xCC, 0xDD};
 
     uint8_t xor8_cs = compute_ref_checksum(id, payload, ref_xor8);
     auto frame = build_raw_frame(id, payload, xor8_cs);
@@ -347,8 +343,8 @@ TEST(ChecksumAlgoTest, NoneAlgoAcceptsAnything) {
     if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
         for (uint8_t cs_byte : {0x00, 0x42, 0xFF}) {
             PacketHandler handler(1024);
-            std::vector<uint8_t> payload = {0x01, 0x02, 0x03};
-            auto frame = build_raw_frame(PACKET_ID_GENERICSTATUSTX, payload, cs_byte);
+            std::vector<uint8_t> payload = {0x01, 0x02, 0x03, 0x04};
+            auto frame = build_raw_frame(PACKET_ID_HEARTBEAT, payload, cs_byte);
 
             handler.feed_data(frame);
             Packet pkt;
@@ -366,15 +362,15 @@ TEST(ChecksumAlgoTest, NoneAlgoAcceptsAnything) {
 TEST(ChecksumAlgoTest, ConsecutivePacketsDifferentTypes) {
     PacketHandler handler(4096);
 
-    Packet_Heartbeat hb = {111};
+    Packet_Heartbeat hb1 = {111};
     Packet_Handshake hs = {PROTOCOL_HASH};
-    Packet_CmdVel cmd = {0.1f, 0.2f, 0.3f};
+    Packet_Heartbeat hb2 = {222};
 
-    auto b1 = handler.pack(PACKET_ID_HEARTBEAT, hb);
+    auto b1 = handler.pack(PACKET_ID_HEARTBEAT, hb1);
     auto b2 = handler.pack(PACKET_ID_HANDSHAKE, hs);
-    auto b3 = handler.pack(PACKET_ID_CMDVEL, cmd);
+    auto b3 = handler.pack(PACKET_ID_HEARTBEAT, hb2);
 
-    // 一次性投喂三种不同类型的包
+    // 一次性投喂多种类型的包
     std::vector<uint8_t> stream;
     stream.insert(stream.end(), b1.begin(), b1.end());
     stream.insert(stream.end(), b2.begin(), b2.end());
@@ -392,11 +388,8 @@ TEST(ChecksumAlgoTest, ConsecutivePacketsDifferentTypes) {
     EXPECT_EQ(pkt.as<Packet_Handshake>().protocol_hash, PROTOCOL_HASH);
 
     ASSERT_TRUE(handler.parse_packet(pkt));
-    EXPECT_EQ(pkt.id, PACKET_ID_CMDVEL);
-    auto cv = pkt.as<Packet_CmdVel>();
-    EXPECT_FLOAT_EQ(cv.linear_x, 0.1f);
-    EXPECT_FLOAT_EQ(cv.linear_y, 0.2f);
-    EXPECT_FLOAT_EQ(cv.angular_z, 0.3f);
+    EXPECT_EQ(pkt.id, PACKET_ID_HEARTBEAT);
+    EXPECT_EQ(pkt.as<Packet_Heartbeat>().count, 222u);
 
     EXPECT_FALSE(handler.parse_packet(pkt));
 }

@@ -189,4 +189,49 @@ TEST_F(PacketHandlerTest, PayloadLongerThanProtocolMaximumIsRejectedAndResynced)
     EXPECT_EQ(pkt.as<Packet_Heartbeat>().count, 33);
 }
 
+TEST_F(PacketHandlerTest, ReliableWirePayloadLengthIsAcceptedForMerlinPickGoal) {
+    PacketHandler handler(64);
+
+    Packet_MerlinPickGoal payload{};
+    payload.x = 1.0f;
+    payload.y = 2.0f;
+    payload.z = 3.0f;
+    payload.yaw = 4.0f;
+
+    std::vector<uint8_t> frame = handler.pack(PACKET_ID_MERLINPICKGOAL, payload);
+    frame[3] = static_cast<uint8_t>(frame[3] + 1);
+    frame.insert(frame.end() - 1, 0x2A);
+    frame.back() = PacketHandler::calculate_checksum(frame.data() + 2, frame.size() - 3);
+
+    handler.feed_data(frame);
+
+    Packet pkt;
+    ASSERT_TRUE(handler.parse_packet(pkt));
+    EXPECT_EQ(pkt.id, PACKET_ID_MERLINPICKGOAL);
+    ASSERT_EQ(pkt.payload.size(), sizeof(Packet_MerlinPickGoal) + 1);
+    EXPECT_EQ(pkt.payload.back(), 0x2A);
+}
+
+TEST_F(PacketHandlerTest, FeedWithRecoveryParsesBufferedFramesBeforeDroppingRemainder) {
+    PacketHandler small_handler(9);
+    Packet_Heartbeat data1 = {201};
+    Packet_Heartbeat data2 = {202};
+
+    std::vector<uint8_t> stream = small_handler.pack(PACKET_ID_HEARTBEAT, data1);
+    auto second = small_handler.pack(PACKET_ID_HEARTBEAT, data2);
+    stream.insert(stream.end(), second.begin(), second.end());
+
+    std::vector<uint32_t> seen_counts;
+    const size_t dropped = feed_data_with_recovery(
+        small_handler, stream.data(), stream.size(),
+        [&seen_counts](const Packet &pkt) {
+            seen_counts.push_back(pkt.as<Packet_Heartbeat>().count);
+        });
+
+    EXPECT_EQ(dropped, 0u);
+    ASSERT_EQ(seen_counts.size(), 2u);
+    EXPECT_EQ(seen_counts[0], 201u);
+    EXPECT_EQ(seen_counts[1], 202u);
+}
+
 }

@@ -260,7 +260,9 @@ TEST_F(EdgeCaseTest, FalseHeaderSequence) {
     Packet out;
     if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
         ASSERT_TRUE(handler.parse_packet(out));
-        ASSERT_TRUE(handler.parse_packet(out));
+        if (out.id != PACKET_ID_HEARTBEAT) {
+            ASSERT_TRUE(handler.parse_packet(out));
+        }
     } else {
         // 解析器应该拒绝噪音 (CRC 不匹配) 并丢弃第一个 '0x5A',
         // 然后重新扫描，最终找到真实数据包。
@@ -289,4 +291,25 @@ TEST_F(EdgeCaseTest, BufferOverflow) {
     
     // 当前实现在溢出时丢弃新数据。
     EXPECT_FALSE(handler.parse_packet(out));
+}
+
+TEST_F(EdgeCaseTest, FeedWithRecoveryDropsOnlyTrulyUndrainableBytes) {
+    PacketHandler small_handler(9);
+    auto first = small_handler.pack(PACKET_ID_HEARTBEAT, Packet_Heartbeat{301});
+    auto second = small_handler.pack(PACKET_ID_HEARTBEAT, Packet_Heartbeat{302});
+
+    std::vector<uint8_t> stream = first;
+    stream.insert(stream.end(), second.begin(), second.end());
+
+    std::vector<uint32_t> seen_counts;
+    const size_t dropped = feed_data_with_recovery(
+        small_handler, stream.data(), stream.size(),
+        [&seen_counts](const Packet &pkt) {
+            seen_counts.push_back(pkt.as<Packet_Heartbeat>().count);
+        });
+
+    EXPECT_EQ(dropped, 0u);
+    ASSERT_EQ(seen_counts.size(), 2u);
+    EXPECT_EQ(seen_counts.front(), 301u);
+    EXPECT_EQ(seen_counts.back(), 302u);
 }

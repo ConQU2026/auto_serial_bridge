@@ -183,7 +183,13 @@ def get_protocol_hash():
     if "PROTOCOL_HASH" in GENERATED_PROTOCOL_MACROS:
         return int(GENERATED_PROTOCOL_MACROS["PROTOCOL_HASH"], 0)
     if PROTOCOL_YAML_CONTENT:
-        return int(hashlib.md5(PROTOCOL_YAML_CONTENT.encode("utf-8")).hexdigest()[:8], 16)
+        canonical_content = yaml.safe_dump(
+            yaml.safe_load(PROTOCOL_YAML_CONTENT),
+            sort_keys=True,
+            default_flow_style=False,
+            allow_unicode=True,
+        )
+        return int(hashlib.md5(canonical_content.encode("utf-8")).hexdigest()[:8], 16)
     return 0
 
 
