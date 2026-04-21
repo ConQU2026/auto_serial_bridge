@@ -15,9 +15,9 @@ namespace auto_serial_bridge
    *
    * 负责数据的校验、打包和解包。使用环形缓冲区实现零拷贝和高性能解析。
    *
-   * 线程模型: feed_data() 和 parse_packet() 必须在同一线程中顺序调用，
-   * 或者由调用方持有同一把锁来保护。在 SerialController 中，两者均在
-   * IoContext 的 async_receive 回调中串行执行，由 rx_mutex_ 统一保护。
+   * 线程模型: feed_data() / try_push_byte() / parse_packet() 必须在同一
+   * 执行序列中顺序调用，或者由调用方显式串行化。在 SerialController 中，
+   * 这些操作都通过 IoContext strand 串行执行。
    */
   class PacketHandler
   {
@@ -77,41 +77,57 @@ namespace auto_serial_bridge
         tail_ = 0;
     }
 
+    bool try_push_byte(uint8_t byte)
+    {
+        size_t next_head = (head_ + 1) % capacity_;
+        if (next_head == tail_) {
+            return false;
+        }
+        ring_buffer_[head_] = byte;
+        head_ = next_head;
+        return true;
+    }
+
+    void record_overflow()
+    {
+        overflow_count_++;
+    }
+
     /**
      * @brief 根据编译期配置分派的校验和计算
      */
-	    static uint8_t calculate_checksum(const uint8_t* data, size_t len)
-	    {
-	      if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
-	        (void)data; (void)len;
-	        return 0x00;
-	      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::SUM8) {
-	        uint8_t sum = 0;
-	        for (size_t i = 0; i < len; ++i) sum += data[i];
-	        return sum;
-	      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::XOR8) {
-	        uint8_t x = 0;
-	        for (size_t i = 0; i < len; ++i) x ^= data[i];
-	        return x;
-	      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::CRC8) {
+    static uint8_t calculate_checksum(const uint8_t* data, size_t len)
+    {
+      if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE) {
+        (void)data; (void)len;
+        return 0x00;
+      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::SUM8) {
+        uint8_t sum = 0;
+        for (size_t i = 0; i < len; ++i) sum += data[i];
+        return sum;
+      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::XOR8) {
+        uint8_t x = 0;
+        for (size_t i = 0; i < len; ++i) x ^= data[i];
+        return x;
+      } else if constexpr (config::CHECKSUM_ALGO == config::ChecksumAlgo::CRC8) {
 #ifdef CHECKSUM_ALGO_CRC8
-	        uint8_t crc = 0;
-	        for (size_t i = 0; i < len; ++i) crc = CRC8_TABLE[crc ^ data[i]];
-	        return crc;
+        uint8_t crc = 0;
+        for (size_t i = 0; i < len; ++i) crc = CRC8_TABLE[crc ^ data[i]];
+        return crc;
 #else
-	        static_assert(config::CHECKSUM_ALGO != config::ChecksumAlgo::CRC8,
-	                      "CRC8 selected but CRC8_TABLE is not available");
-	        return 0x00;
+        static_assert(config::CHECKSUM_ALGO != config::ChecksumAlgo::CRC8,
+                      "CRC8 selected but CRC8_TABLE is not available");
+        return 0x00;
 #endif
-	      } else {
-	        static_assert(config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE ||
-	                      config::CHECKSUM_ALGO == config::ChecksumAlgo::SUM8 ||
-	                      config::CHECKSUM_ALGO == config::ChecksumAlgo::XOR8 ||
-	                      config::CHECKSUM_ALGO == config::ChecksumAlgo::CRC8,
-	                      "Unsupported checksum algorithm");
-	        return 0x00;
-	      }
-	    }
+      } else {
+        static_assert(config::CHECKSUM_ALGO == config::ChecksumAlgo::NONE ||
+                      config::CHECKSUM_ALGO == config::ChecksumAlgo::SUM8 ||
+                      config::CHECKSUM_ALGO == config::ChecksumAlgo::XOR8 ||
+                      config::CHECKSUM_ALGO == config::ChecksumAlgo::CRC8,
+                      "Unsupported checksum algorithm");
+        return 0x00;
+      }
+    }
 
     /**
      * @brief 打包数据 (ROS -> MCU)
@@ -149,15 +165,11 @@ namespace auto_serial_bridge
     {
         size_t dropped = 0;
         for (size_t i = 0; i < len; ++i) {
-            size_t next_head = (head_ + 1) % capacity_;
-            if (next_head != tail_) {
-                ring_buffer_[head_] = data[i];
-                head_ = next_head;
-            } else {
-                dropped = len - i;
-                overflow_count_++;
-                break; 
+            if (try_push_byte(data[i])) {
+                continue;
             }
+            dropped++;
+            overflow_count_++;
         }
         return dropped;
     }
@@ -254,5 +266,54 @@ namespace auto_serial_bridge
     
     
   };
+
+} // namespace auto_serial_bridge
+
+namespace auto_serial_bridge
+{
+
+template <typename PacketConsumer>
+size_t feed_data_with_recovery(
+    PacketHandler &handler,
+    const uint8_t *data,
+    size_t len,
+    PacketConsumer &&consumer)
+{
+    size_t dropped = 0;
+    Packet pkt;
+
+    for (size_t i = 0; i < len; ++i) {
+        if (handler.try_push_byte(data[i])) {
+            continue;
+        }
+
+        bool drained_any = false;
+        while (handler.parse_packet(pkt)) {
+            drained_any = true;
+            consumer(pkt);
+        }
+
+        if (handler.try_push_byte(data[i])) {
+            continue;
+        }
+
+        // 缓冲满且 drain 无效，reset 缓冲区以避免后续字节全部丢弃
+        if (!drained_any) {
+            handler.reset();
+        }
+
+        handler.record_overflow();
+        dropped++;
+
+        // reset 后重试当前字节
+        handler.try_push_byte(data[i]);
+    }
+
+    while (handler.parse_packet(pkt)) {
+        consumer(pkt);
+    }
+
+    return dropped;
+}
 
 } // namespace auto_serial_bridge

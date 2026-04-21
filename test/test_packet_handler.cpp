@@ -189,4 +189,26 @@ TEST_F(PacketHandlerTest, PayloadLongerThanProtocolMaximumIsRejectedAndResynced)
     EXPECT_EQ(pkt.as<Packet_Heartbeat>().count, 33);
 }
 
+TEST_F(PacketHandlerTest, FeedWithRecoveryParsesBufferedFramesBeforeDroppingRemainder) {
+    PacketHandler small_handler(9);
+    Packet_Heartbeat data1 = {201};
+    Packet_Heartbeat data2 = {202};
+
+    std::vector<uint8_t> stream = small_handler.pack(PACKET_ID_HEARTBEAT, data1);
+    auto second = small_handler.pack(PACKET_ID_HEARTBEAT, data2);
+    stream.insert(stream.end(), second.begin(), second.end());
+
+    std::vector<uint32_t> seen_counts;
+    const size_t dropped = feed_data_with_recovery(
+        small_handler, stream.data(), stream.size(),
+        [&seen_counts](const Packet &pkt) {
+            seen_counts.push_back(pkt.as<Packet_Heartbeat>().count);
+        });
+
+    EXPECT_EQ(dropped, 0u);
+    ASSERT_EQ(seen_counts.size(), 2u);
+    EXPECT_EQ(seen_counts[0], 201u);
+    EXPECT_EQ(seen_counts[1], 202u);
+}
+
 }

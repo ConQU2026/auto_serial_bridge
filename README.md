@@ -136,13 +136,21 @@ messages:
 > `enable_heartbeat=true` 且 `heartbeat_timeout_ms>0` 时，ROS 会发送心跳并在 ACK 超时后断开重连；
 > `enable_heartbeat=true` 且 `heartbeat_timeout_ms=0` 时，ROS 仍发送心跳，但不会因 ACK 超时判定断连；
 > `enable_heartbeat=false` 时，ROS 不发送心跳，也不做 ACK 断连检测。
+>
+> **重传机制**：当消息设置 `reliable: true` 时（仅限 `tx` / `both`），ROS 端发送时会在Payload末尾**透明地注入 1 字节的序列号 (ack_seq)**，无需在 YAML 或结构体里显式定义该附加字段。
 
 ### 4. 编译项目
 
 在你的 ROS2 工作空间根目录下，且已经自行准备好私有 `config/protocol.yaml` 后：
 
 ```bash
+# 日常编译（跳过测试编译，更快，避免因 YAML 缺失默认包报错）
+colcon build --packages-select auto_serial_bridge --cmake-args -DBUILD_TESTING=OFF
+
+# 开发者/测试人员
 colcon build --packages-select auto_serial_bridge
+colcon test --packages-select auto_serial_bridge
+
 source install/setup.bash
 ```
 
@@ -152,7 +160,12 @@ source install/setup.bash
 我们提供了两种示例, 一种是使用节点的方式启动, 一种是使用组件化方式启动
 
 ## DEBUG说明
-开启该节点的debug模式之后, 会打印当前接收到的十六进制数据包以及发送的十六进制数据包.
+默认日志会在握手/心跳异常时输出可直接定位的问题信息，包括：
+
+- 握手不匹配时的本地 hash 与下位机 hash 对比
+- 心跳 ACK 不匹配时的 expected/got、当前状态与 payload 十六进制摘要
+
+开启该节点的 debug 级别后，还会看到等待握手阶段的收发过滤提示（例如握手前丢弃了哪些非握手包），便于排查“握手没对上但业务包已发送”的问题。
 
 ## 测试
 
@@ -175,8 +188,49 @@ python3 -m pytest -q test/test_codegen_checksum.py test/test_public_ci_contract.
 colcon test --packages-select auto_serial_bridge --event-handlers console_direct+
 ```
 
+### socat 串口极端场景回归（推荐）
+
+为了尽量提前发现现场串口问题（分片、粘包、双向并发、大包、端口重开、短突发），建议在改动串口链路后执行基于 `socat` 的回归：
+
+当前 `test/test_scocat.py` 重点覆盖：
+- 大包完整性与双向传输一致性
+- 分片 + 粘包混合输入下的数据顺序保持
+- 全双工并发收发
+- 端口中途重开后的恢复能力
+- 高频短突发稳定性
+- 控制字节透传（raw 模式）
+- 抖动/静默窗口注入后的链路连续性
+
+```bash
+python3 -m pytest -q test/test_scocat.py
+```
+
+做稳定性压力回归时，可连续多轮执行：
+
+```bash
+for i in $(seq 1 5); do
+  echo "[socat stress round $i]"
+  python3 -m pytest -q test/test_scocat.py || exit 1
+done
+```
+
+如果还需要验证 ROS 节点侧握手/心跳/重连行为（默认不在公开 CI 中执行），可启用 PTY 端到端测试：
+
+```bash
+AUTO_SERIAL_BRIDGE_RUN_PTY_INTEGRATION=1 python3 -m pytest -q test/test_main.py
+```
+
+如果需要分钟级验证“链路短时断开 + 自动恢复 + 数据一致性”（默认关闭，避免影响日常回归时长），可启用长时 socat 用例：
+
+```bash
+AUTO_SERIAL_BRIDGE_RUN_LONG_SOAK=1 python3 -m pytest -q test/test_scocat.py -k long_run
+```
+
 ## 更新日志
 
+请参阅此项目文件中的详细 [CHANGELOG.md](CHANGELOG.md) 了解所有版本的完整更新历史。
+
+*   **v1.1 / Recent**: 优化和强化了各项核心功能，并加强了心跳、热插拔和可配置化校验和功能。增加自动化测试，重构了部分代码结构。
 *   **v1.0**: 实现了基于 `protocol.yaml` 的全自动代码生成。
     *   **核心特性**：
         *   支持 `protocol.yaml` 配置变化检测，仅在配置更改时触发重新生成。

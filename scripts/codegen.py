@@ -26,18 +26,44 @@ def generate_crc8_table():
         table.append(crc & 0xFF)
     return table
 
-def calculate_protocol_hash(yaml_content):
-    """计算协议哈希值。
+def canonicalize_protocol_hash_input(protocol_source):
+    """将协议配置规范化为稳定文本，用于计算协议哈希。
 
-    基于YAML内容计算MD5哈希，用于校验MCU和ROS端的协议一致性。
+    忽略空白、注释和 mapping 键顺序差异，但保留列表顺序，
+    以便把真正会影响协议布局的变化保留下来。
 
     Args:
-        yaml_content: 协议文件的原始内容字符串。
+        protocol_source: YAML 原始文本或已解析的配置字典。
+
+    Returns:
+        规范化后的 YAML 文本。
+    """
+    if isinstance(protocol_source, str):
+        config_data = yaml.safe_load(protocol_source)
+    else:
+        config_data = protocol_source
+
+    return yaml.safe_dump(
+        config_data,
+        sort_keys=True,
+        default_flow_style=False,
+        allow_unicode=True,
+    )
+
+
+def calculate_protocol_hash(protocol_source):
+    """计算协议哈希值。
+
+    基于协议的规范化结构计算 MD5 哈希，用于校验 MCU 和 ROS 端的协议一致性。
+
+    Args:
+        protocol_source: YAML 原始文本或已解析的配置字典。
 
     Returns:
         32位整数哈希值。
     """
-    return int(hashlib.md5(yaml_content.encode('utf-8')).hexdigest()[:8], 16)
+    canonical_content = canonicalize_protocol_hash_input(protocol_source)
+    return int(hashlib.md5(canonical_content.encode('utf-8')).hexdigest()[:8], 16)
 
 def get_c_type(yaml_type, type_mappings):
     """获取对应的C语言类型。
@@ -113,12 +139,14 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
         f.write(f"// Generated at: {generated_at}\n")
         f.write("#pragma once\n")
         f.write("#include <stdint.h>\n")
+        f.write("#include <stddef.h>\n")
         f.write("\n")
         f.write(render_block(user_blocks, "Includes"))
         f.write("\n")
 
         checksum_algo = config.get('checksum', 'CRC8').upper()
         require_handshake = config.get('require_handshake', True)
+        ignore_version_mismatch = config.get('ignore_version_mismatch', True)
         enable_heartbeat = config.get('enable_heartbeat', True)
 
         f.write("// 协议哈希校验码\n")
@@ -131,10 +159,22 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
 
         f.write(f"// 握手配置\n")
         f.write(f"#define CFG_REQUIRE_HANDSHAKE {1 if require_handshake else 0}\n")
+        f.write(f"#define CFG_IGNORE_VERSION_MISMATCH {1 if ignore_version_mismatch else 0}\n")
         f.write("\n")
 
+        strict_heartbeat = config.get('strict_heartbeat', True)
+        heartbeat_timeout_ms = config.get('heartbeat_timeout_ms', 3000)
         f.write(f"// 心跳配置\n")
         f.write(f"#define CFG_ENABLE_HEARTBEAT {1 if enable_heartbeat else 0}\n")
+        f.write(f"#define CFG_STRICT_HEARTBEAT {1 if strict_heartbeat else 0}\n")
+        f.write(f"#define CFG_HEARTBEAT_TIMEOUT_MS {heartbeat_timeout_ms}\n")
+        f.write("\n")
+
+        reliable_retry_interval_ms = config.get('reliable_retry_interval_ms', 100)
+        reliable_max_retries = config.get('reliable_max_retries', 3)
+        f.write(f"// 可靠传输配置\n")
+        f.write(f"#define CFG_RELIABLE_RETRY_INTERVAL_MS {reliable_retry_interval_ms}\n")
+        f.write(f"#define CFG_RELIABLE_MAX_RETRIES {reliable_max_retries}\n")
         f.write("\n")
 
         f.write(render_block(user_blocks, "Private_Defines"))
@@ -164,7 +204,7 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
         f.write("\n")
 
         f.write("// 协议辅助函数声明\n")
-        f.write("uint8_t calculate_checksum(const uint8_t* data, uint8_t len);\n")
+        f.write("uint8_t calculate_checksum(const uint8_t* data, size_t len);\n")
         f.write("void protocol_fsm_feed(uint8_t byte);\n")
         f.write("\n")
         f.write("// 用户可覆盖的接收回调与自动生成的发送函数声明\n")
@@ -188,9 +228,10 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
 
 def generate_mcu_source(config, messages, output_path, user_blocks, generated_at):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    buffer_size = config.get('buffer_size', 256)
+    buffer_size = config.get('buffer_size', 1024)
     checksum_algo = config.get('checksum', 'CRC8').upper()
     require_handshake = config.get('require_handshake', True)
+    ignore_version_mismatch = config.get('ignore_version_mismatch', True)
     enable_heartbeat = config.get('enable_heartbeat', True)
 
     with open(output_path, 'w') as f:
@@ -248,15 +289,28 @@ static uint8_t checksum_update(uint8_t current, uint8_t byte) {
 """)
 
         f.write("""
-uint8_t calculate_checksum(const uint8_t* data, uint8_t len) {
+uint8_t calculate_checksum(const uint8_t* data, size_t len) {
     uint8_t cs = 0;
-    for (uint8_t i = 0; i < len; i++) {
+    for (size_t i = 0; i < len; i++) {
         cs = checksum_update(cs, data[i]);
     }
     return cs;
 }
 """)
-        
+
+        # 可靠传输序列号全局变量与辅助函数
+        has_reliable = any(m.get('reliable', False) for m in messages)
+        if has_reliable:
+            f.write("// 可靠传输序列号：ROS 端在 reliable 包 payload 末尾追加 1 字节 seq，\n")
+            f.write("// MCU 收到后存入此变量，ACK 回传时携带该 seq 以区分同 ID 的不同版本。\n")
+            f.write("static uint8_t g_last_reliable_seq = 0;\n\n")
+            f.write("static inline void send_reliable_ack(PacketID id) {\n")
+            f.write("    Packet_Ack ack;\n")
+            f.write("    ack.acked_id = (uint8_t)id;\n")
+            f.write("    ack.ack_seq = g_last_reliable_seq;\n")
+            f.write("    send_Ack(&ack);\n")
+            f.write("}\n\n")
+
         f.write("\n")
         f.write(render_block(user_blocks, "Private_Variables"))
         f.write("\n")
@@ -268,13 +322,21 @@ uint8_t calculate_checksum(const uint8_t* data, uint8_t len) {
             func_name = f"on_receive_{msg['name']}"
             f.write(f"__attribute__((weak)) void {func_name}(const Packet_{msg['name']}* pkt) {{\n")
             if msg['name'] == 'Handshake' and require_handshake:
-                f.write("    // Default system behavior: ack matching protocol hash automatically.\n")
-                f.write("    if (pkt->protocol_hash == PROTOCOL_HASH) {\n")
-                f.write("        send_Handshake(pkt);\n")
-                f.write("    }\n")
+                if ignore_version_mismatch:
+                    f.write("    // Default system behavior: keep handshake flow even when protocol hash differs.\n")
+                    f.write("    send_Handshake(pkt);\n")
+                else:
+                    f.write("    // Default system behavior: ack matching protocol hash automatically.\n")
+                    f.write("    if (pkt->protocol_hash == PROTOCOL_HASH) {\n")
+                    f.write("        send_Handshake(pkt);\n")
+                    f.write("    }\n")
             if msg['name'] == 'Heartbeat' and enable_heartbeat:
                 f.write("    // Default system behavior: ack the latest heartbeat with the same count.\n")
                 f.write("    send_Heartbeat(pkt);\n")
+            if msg.get('reliable', False) and msg.get('direction') in ('tx', 'both'):
+                f.write("    // Default system behavior: ack reliable command reception.\n")
+                f.write("    // If this callback is overridden, call send_reliable_ack() manually in user code.\n")
+                f.write(f"    send_reliable_ack(PACKET_ID_{msg['name'].upper()});\n")
             f.write(render_block(user_blocks, func_name))
             f.write("}\n")
 
@@ -350,9 +412,16 @@ void protocol_fsm_feed(uint8_t byte) {{
         for msg in messages:
             # Generate parsing logic for ALL messages
             f.write(f"                    case PACKET_ID_{msg['name'].upper()}:\n")
-            f.write(f"                        if (rx_data_len == sizeof(Packet_{msg['name']})) {{\n")
-            f.write(f"                            on_receive_{msg['name']}((Packet_{msg['name']}*)rx_buffer);\n")
-            f.write(f"                        }}\n")
+            if msg.get('reliable', False):
+                # reliable 包: ROS 端会在 payload 末尾追加 1 字节 seq
+                f.write(f"                        if (rx_data_len == sizeof(Packet_{msg['name']}) + 1) {{\n")
+                f.write(f"                            g_last_reliable_seq = rx_buffer[sizeof(Packet_{msg['name']})];//提取seq\n")
+                f.write(f"                            on_receive_{msg['name']}((Packet_{msg['name']}*)rx_buffer);\n")
+                f.write(f"                        }}\n")
+            else:
+                f.write(f"                        if (rx_data_len == sizeof(Packet_{msg['name']})) {{\n")
+                f.write(f"                            on_receive_{msg['name']}((Packet_{msg['name']}*)rx_buffer);\n")
+                f.write(f"                        }}\n")
             f.write(f"                        break;\n")
 
 
@@ -452,6 +521,40 @@ def _analyze_ros_path(path: str, root_var: str, pointer: bool):
     return access_expr, vector_requirements
 
 
+def _needs_int32_multiarray_u8_range_guard(ros_msg: str, field: dict, type_mappings: dict) -> bool:
+    return (
+        ros_msg == "std_msgs/msg/Int32MultiArray" and
+        get_c_type(field['type'], type_mappings) == "uint8_t"
+    )
+
+
+def _write_u8_range_guard(f, msg_name: str, topic: str, field_name: str, read_expr: str) -> None:
+    f.write(f"            if ({read_expr} < 0 || {read_expr} > 255) {{\n")
+    f.write("                RCLCPP_ERROR_THROTTLE(\n")
+    f.write("                    node->get_logger(), *node->get_clock(), 2000,\n")
+    f.write(
+        f"                    \"Message for {msg_name} on {topic} field {field_name} is out of uint8 range [0, 255]: %d\",\n"
+    )
+    f.write(f"                    static_cast<int>({read_expr}));\n")
+    f.write("                return;\n")
+    f.write("            }\n")
+
+
+def _normalize_debug_log_mode(value) -> str:
+    if value is None:
+        return "on_change"
+    return str(value).strip().lower()
+
+
+def _identifier_fragment(name: str) -> str:
+    fragment = re.sub(r'[^0-9A-Za-z_]', '_', str(name))
+    if not fragment:
+        return "msg"
+    if fragment[0].isdigit():
+        return f"msg_{fragment}"
+    return fragment
+
+
 def generate_ros_bindings(messages, type_mappings, config, output_path):
     """生成ROS端使用的C++绑定代码。
 
@@ -472,6 +575,8 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
 
     with open(output_path, 'w') as f:
         f.write("#pragma once\n")
+        f.write("#include <cstdint>\n")
+        f.write("#include <cstring>\n")
         f.write("#include <functional>\n")
         f.write("#include \"auto_serial_bridge/serial_controller.hpp\"\n")
         for inc in includes:
@@ -534,38 +639,55 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
 
                 f.write(f"            Packet_{msg['name']} pkt;\n")
                 for field, read_expr in field_reads:
-                    f.write(f"            pkt.{field['proto']} = {read_expr};\n")
+                    c_type = get_c_type(field['type'], type_mappings)
+                    if _needs_int32_multiarray_u8_range_guard(msg['ros_msg'], field, type_mappings):
+                        _write_u8_range_guard(f, msg['name'], topic, field['proto'], read_expr)
+                        f.write(f"            pkt.{field['proto']} = static_cast<{c_type}>({read_expr});\n")
+                    else:
+                        f.write(f"            pkt.{field['proto']} = {read_expr};\n")
                 
-                f.write(f"            node->send_packet(PACKET_ID_{msg['name'].upper()}, pkt);\n")
-                if msg['name'] != 'CmdVel':
-                    fmt_parts = []
-                    arg_parts = []
-                    for field in msg['fields']:
-                        field_name = field['proto']
-                        field_type = str(field.get('type', '')).lower()
-                        if field_type.startswith('f'):
-                            fmt_parts.append(f"{field_name}=%.3f")
-                            arg_parts.append(f"static_cast<double>(pkt.{field_name})")
-                        elif field_type.startswith('u'):
-                            fmt_parts.append(f"{field_name}=%u")
-                            arg_parts.append(f"static_cast<unsigned int>(pkt.{field_name})")
-                        elif field_type.startswith('i'):
-                            fmt_parts.append(f"{field_name}=%d")
-                            arg_parts.append(f"static_cast<int>(pkt.{field_name})")
-                        else:
-                            fmt_parts.append(f"{field_name}=%d")
-                            arg_parts.append(f"static_cast<int>(pkt.{field_name})")
+                send_api = "reliable_send" if msg.get('reliable', False) else "send_packet"
+                f.write(f"            node->{send_api}(PACKET_ID_{msg['name'].upper()}, pkt);\n")
+                debug_log_mode = msg.get('debug_log_mode', 'on_change')
+                fmt_parts = []
+                arg_parts = []
+                for field in msg['fields']:
+                    field_name = field['proto']
+                    field_type = str(field.get('type', '')).lower()
+                    if field_type.startswith('f'):
+                        fmt_parts.append(f"{field_name}=%.3f")
+                        arg_parts.append(f"static_cast<double>(pkt.{field_name})")
+                    elif field_type.startswith('u'):
+                        fmt_parts.append(f"{field_name}=%u")
+                        arg_parts.append(f"static_cast<unsigned int>(pkt.{field_name})")
+                    elif field_type.startswith('i'):
+                        fmt_parts.append(f"{field_name}=%d")
+                        arg_parts.append(f"static_cast<int>(pkt.{field_name})")
+                    else:
+                        fmt_parts.append(f"{field_name}=%d")
+                        arg_parts.append(f"static_cast<int>(pkt.{field_name})")
 
+                if debug_log_mode == 'on_change':
+                    log_ident = _identifier_fragment(msg['name'])
+                    f.write(f"            static bool has_previous_pkt_{log_ident} = false;\n")
+                    f.write(f"            static Packet_{msg['name']} previous_pkt_{log_ident}{{}};\n")
+                    f.write(
+                        f"            const bool should_log_{log_ident} = !has_previous_pkt_{log_ident} || std::memcmp(&previous_pkt_{log_ident}, &pkt, sizeof(Packet_{msg['name']})) != 0;\n"
+                    )
+                    f.write(f"            if (should_log_{log_ident}) {{\n")
+                    f.write(f"                previous_pkt_{log_ident} = pkt;\n")
+                    f.write(f"                has_previous_pkt_{log_ident} = true;\n")
                     if fmt_parts:
                         fmt_str = ", ".join(fmt_parts)
                         args_str = ", ".join(arg_parts)
                         f.write(
-                            f"            RCLCPP_DEBUG(node->get_logger(), \"TX {msg['name']}: {fmt_str}\", {args_str});\n"
+                            f"                RCLCPP_DEBUG(node->get_logger(), \"TX {msg['name']}: {fmt_str}\", {args_str});\n"
                         )
                     else:
                         f.write(
-                            f"            RCLCPP_DEBUG(node->get_logger(), \"TX {msg['name']}\");\n"
+                            f"                RCLCPP_DEBUG(node->get_logger(), \"TX {msg['name']}\");\n"
                         )
+                    f.write("            }\n")
                 f.write(f"        }}));\n")
                 f.write("\n")
 
@@ -620,8 +742,13 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
                 for expr, required_size in sorted(vector_requirements.items()):
                      f.write(f"            {expr}.resize({required_size});\n")
                 for field, write_expr in field_writes:
-                     f.write(f"            {write_expr} = pkt->{field['proto']};\n")
+                     c_type = get_c_type(field['type'], type_mappings)
+                     if msg['ros_msg'] == "std_msgs/msg/Int32MultiArray" and c_type == "uint8_t":
+                         f.write(f"            {write_expr} = static_cast<int32_t>(pkt->{field['proto']});\n")
+                     else:
+                         f.write(f"            {write_expr} = pkt->{field['proto']};\n")
 
+                debug_log_mode = msg.get('debug_log_mode', 'on_change')
                 fmt_parts = []
                 arg_parts = []
                 for field in msg['fields']:
@@ -640,16 +767,27 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
                         fmt_parts.append(f"{field_name}=%d")
                         arg_parts.append(f"static_cast<int>(pkt->{field_name})")
 
-                if fmt_parts:
-                    fmt_str = ", ".join(fmt_parts)
-                    args_str = ", ".join(arg_parts)
+                if debug_log_mode == 'on_change':
+                    log_ident = _identifier_fragment(msg['name'])
+                    f.write(f"            static bool has_previous_pkt_{log_ident} = false;\n")
+                    f.write(f"            static Packet_{msg['name']} previous_pkt_{log_ident}{{}};\n")
                     f.write(
-                        f"            RCLCPP_DEBUG(logger, \"RX {msg['name']}: {fmt_str}\", {args_str});\n"
+                        f"            const bool should_log_{log_ident} = !has_previous_pkt_{log_ident} || std::memcmp(&previous_pkt_{log_ident}, pkt, sizeof(Packet_{msg['name']})) != 0;\n"
                     )
-                else:
-                    f.write(
-                        f"            RCLCPP_DEBUG(logger, \"RX {msg['name']}\");\n"
-                    )
+                    f.write(f"            if (should_log_{log_ident}) {{\n")
+                    f.write(f"                previous_pkt_{log_ident} = *pkt;\n")
+                    f.write(f"                has_previous_pkt_{log_ident} = true;\n")
+                    if fmt_parts:
+                        fmt_str = ", ".join(fmt_parts)
+                        args_str = ", ".join(arg_parts)
+                        f.write(
+                            f"                RCLCPP_DEBUG(logger, \"RX {msg['name']}: {fmt_str}\", {args_str});\n"
+                        )
+                    else:
+                        f.write(
+                            f"                RCLCPP_DEBUG(logger, \"RX {msg['name']}\");\n"
+                        )
+                    f.write("            }\n")
                 
                 f.write(f"            if (pubs.pub_{msg['name']}) {{\n")
                 f.write(f"                pubs.pub_{msg['name']}->publish(msg);\n")
@@ -668,9 +806,13 @@ def generate_cpp_config(config, messages, type_mappings, output_path):
 
     checksum_algo = config.get('checksum', 'CRC8').upper()
     require_handshake = config.get('require_handshake', True)
+    ignore_version_mismatch = config.get('ignore_version_mismatch', True)
     qos_depth = config.get('qos_depth', 10)
     heartbeat_timeout_ms = config.get('heartbeat_timeout_ms', 3000)
     enable_heartbeat = config.get('enable_heartbeat', True)
+    strict_heartbeat = config.get('strict_heartbeat', True)
+    reliable_retry_interval_ms = config.get('reliable_retry_interval_ms', 100)
+    reliable_max_retries = config.get('reliable_max_retries', 3)
 
     with open(output_path, 'w') as f:
         f.write("#pragma once\n")
@@ -690,9 +832,13 @@ def generate_cpp_config(config, messages, type_mappings, output_path):
         f.write(f"    constexpr ChecksumAlgo CHECKSUM_ALGO = ChecksumAlgo::{checksum_algo};\n\n")
 
         f.write(f"    constexpr bool REQUIRE_HANDSHAKE = {'true' if require_handshake else 'false'};\n")
+        f.write(f"    constexpr bool IGNORE_VERSION_MISMATCH = {'true' if ignore_version_mismatch else 'false'};\n")
         f.write(f"    constexpr bool ENABLE_HEARTBEAT = {'true' if enable_heartbeat else 'false'};\n")
+        f.write(f"    constexpr bool STRICT_HEARTBEAT = {'true' if strict_heartbeat else 'false'};\n")
         f.write(f"    constexpr size_t QOS_DEPTH = {qos_depth};\n")
         f.write(f"    constexpr int HEARTBEAT_TIMEOUT_MS = {heartbeat_timeout_ms};\n")
+        f.write(f"    constexpr int RELIABLE_RETRY_INTERVAL_MS = {reliable_retry_interval_ms};\n")
+        f.write(f"    constexpr int RELIABLE_MAX_RETRIES = {reliable_max_retries};\n")
         max_payload_size = max(
             sum(_C_TYPE_SIZES.get(get_c_type(field['type'], type_mappings), 1) for field in msg['fields'])
             for msg in messages
@@ -792,6 +938,11 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
         f.write("> **Auto-generated** — 由 `scripts/codegen.py` 根据 `config/protocol.yaml` 生成，请勿手动修改。\n\n")
         f.write("---\n\n")
 
+        strict_heartbeat = config.get('strict_heartbeat', True)
+        heartbeat_timeout_ms = config.get('heartbeat_timeout_ms', 3000)
+        reliable_retry_interval_ms = config.get('reliable_retry_interval_ms', 100)
+        reliable_max_retries = config.get('reliable_max_retries', 3)
+
         # ── 全局参数 ──
         f.write("## 全局参数\n\n")
         f.write(f"| 参数 | 值 |\n")
@@ -802,6 +953,10 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
         f.write(f"| 校验算法 | `{checksum}` |\n")
         f.write(f"| 强制握手 | `{'是' if require_handshake else '否'}` |\n")
         f.write(f"| 协议哈希（握手用）| `0x{protocol_hash:08X}` |\n")
+        f.write(f"| 严格心跳模式 | `{'是' if strict_heartbeat else '否'}` |\n")
+        f.write(f"| 心跳超时时间 | `{heartbeat_timeout_ms} ms` |\n")
+        f.write(f"| 可靠传输重试间隔 | `{reliable_retry_interval_ms} ms` |\n")
+        f.write(f"| 可靠传输最大重试 | `{reliable_max_retries} 次` |\n")
         f.write("\n---\n\n")
 
         # ── 帧格式 ──
@@ -860,6 +1015,8 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
                     f.write("- **默认生成行为**：`on_receive_Handshake()` 在收到匹配 `PROTOCOL_HASH` 的握手包后会自动调用 `send_Handshake(pkt)` 回包。\n")
                 if msg['name'] == 'Heartbeat' and enable_heartbeat:
                     f.write("- **默认生成行为**：`on_receive_Heartbeat()` 会自动调用 `send_Heartbeat(pkt)`，按原样回同一个 `count` 作为 ACK。\n")
+                if msg.get('reliable', False):
+                    f.write("- **可靠投递**：该消息启用 ACK/重传。默认 weak 回调会自动 `send_Ack()`；若你覆写 `on_receive_xxx()`，需手动回 ACK。\n")
                 f.write("\n")
                 f.write(_field_table(msg['fields'], type_mappings, checksum))
                 f.write("\n\n")
@@ -885,7 +1042,20 @@ def validate_protocol(config_data):
     if 'head_byte_1' not in cfg or 'head_byte_2' not in cfg:
         errors.append("Protocol must define 'head_byte_1' and 'head_byte_2'.")
 
+    ignore_version_mismatch = cfg.get('ignore_version_mismatch', True)
+    if not isinstance(ignore_version_mismatch, bool):
+        errors.append("config.ignore_version_mismatch must be boolean.")
+
+    reliable_retry_interval_ms = cfg.get('reliable_retry_interval_ms', 100)
+    if not isinstance(reliable_retry_interval_ms, int) or reliable_retry_interval_ms <= 0:
+        errors.append("config.reliable_retry_interval_ms must be a positive integer.")
+
+    reliable_max_retries = cfg.get('reliable_max_retries', 3)
+    if not isinstance(reliable_max_retries, int) or reliable_max_retries <= 0:
+        errors.append("config.reliable_max_retries must be a positive integer.")
+
     VALID_DIRECTIONS = {"tx", "rx", "both"}
+    VALID_DEBUG_LOG_MODES = {"on_change", "off"}
     seen_ids = {}
     seen_names = set()
 
@@ -898,6 +1068,20 @@ def validate_protocol(config_data):
 
         if msg.get('direction') not in VALID_DIRECTIONS:
             errors.append(f"Message '{label}' has invalid direction '{msg.get('direction')}'. Must be one of: {', '.join(sorted(VALID_DIRECTIONS))}")
+
+        debug_log_mode = _normalize_debug_log_mode(msg.get('debug_log_mode', 'on_change'))
+        if debug_log_mode not in VALID_DEBUG_LOG_MODES:
+            errors.append(
+                f"Message '{label}' has invalid debug_log_mode '{msg.get('debug_log_mode')}'. Must be one of: {', '.join(sorted(VALID_DEBUG_LOG_MODES))}."
+            )
+        else:
+            msg['debug_log_mode'] = debug_log_mode
+
+        if 'reliable' in msg and not isinstance(msg.get('reliable'), bool):
+            errors.append(f"Message '{label}' has invalid reliable='{msg.get('reliable')}'. Must be boolean.")
+
+        if msg.get('reliable', False) and msg.get('direction') not in ('tx', 'both'):
+            errors.append(f"Message '{label}' sets reliable=true but direction is '{msg.get('direction')}'. reliable is only allowed for tx/both.")
 
         mid = msg.get('id')
         if mid is not None:
@@ -944,7 +1128,7 @@ def main():
 
     validate_protocol(config_data)
         
-    phash = calculate_protocol_hash(content)
+    phash = calculate_protocol_hash(config_data)
     generated_at = generate_timestamp()
     
     mcu_header_path = os.path.join(output_dir, 'mcu_output', 'protocol.h')

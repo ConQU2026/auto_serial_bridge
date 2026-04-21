@@ -8,7 +8,7 @@ namespace auto_serial_bridge {
 namespace config {
 
     constexpr uint32_t DEFAULT_BAUDRATE = 115200;
-    constexpr size_t BUFFER_SIZE = 256;
+    constexpr size_t BUFFER_SIZE = 1024;
     constexpr uint8_t CFG_FRAME_HEADER1 = 90;
     constexpr uint8_t CFG_FRAME_HEADER2 = 165;
 
@@ -16,13 +16,18 @@ namespace config {
     constexpr ChecksumAlgo CHECKSUM_ALGO = ChecksumAlgo::CRC8;
 
     constexpr bool REQUIRE_HANDSHAKE = true;
+    constexpr bool IGNORE_VERSION_MISMATCH = true;
     constexpr bool ENABLE_HEARTBEAT = true;
+    constexpr bool STRICT_HEARTBEAT = true;
     constexpr size_t QOS_DEPTH = 10;
     constexpr int HEARTBEAT_TIMEOUT_MS = 10000;
+    constexpr int RELIABLE_RETRY_INTERVAL_MS = 100;
+    constexpr int RELIABLE_MAX_RETRIES = 3;
     constexpr size_t MAX_PACKET_PAYLOAD_SIZE = 16;
 
     inline constexpr size_t expected_payload_size(PacketID id) {
         switch (id) {
+            case PACKET_ID_ACK: return sizeof(Packet_Ack);
             case PACKET_ID_HEARTBEAT: return sizeof(Packet_Heartbeat);
             case PACKET_ID_HANDSHAKE: return sizeof(Packet_Handshake);
             case PACKET_ID_CMDVEL: return sizeof(Packet_CmdVel);

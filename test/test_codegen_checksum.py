@@ -40,6 +40,17 @@ def _run_codegen(config_dict: dict, output_dir: str) -> subprocess.CompletedProc
     )
 
 
+def _run_codegen_text(config_text: str, output_dir: str) -> subprocess.CompletedProcess:
+    config_path = os.path.join(output_dir, 'protocol.yaml')
+    with open(config_path, 'w') as f:
+        f.write(config_text)
+
+    return subprocess.run(
+        [sys.executable, CODEGEN_SCRIPT, config_path, output_dir],
+        capture_output=True, text=True,
+    )
+
+
 def _read_generated(output_dir: str, relpath: str) -> str:
     fpath = os.path.join(output_dir, relpath)
     with open(fpath, 'r') as f:
@@ -60,6 +71,12 @@ def _extract_timestamp(pattern: str, content: str, error_message: str) -> str:
     match = re.search(pattern, content, re.MULTILINE)
     assert match is not None, error_message
     return match.group("ts")
+
+
+def _extract_protocol_hash(content: str) -> str:
+    match = re.search(r"^#define PROTOCOL_HASH (?P<hash>0x[0-9A-F]+)$", content, re.MULTILINE)
+    assert match is not None, "生成文件中应包含 PROTOCOL_HASH 宏"
+    return match.group("hash")
 
 
 # ============================================================================
@@ -217,6 +234,59 @@ def test_enable_heartbeat_mcu_macro(enable_heartbeat, tmpdir):
     content = _read_generated(tmpdir, 'mcu_output/protocol.h')
     expected_val = '1' if enable_heartbeat else '0'
     assert f"CFG_ENABLE_HEARTBEAT {expected_val}" in content
+
+
+@pytest.mark.parametrize("strict_heartbeat", [True, False])
+def test_strict_heartbeat_config_propagates_to_generated_headers(strict_heartbeat, tmpdir):
+    cfg = _load_sample_config()
+    cfg['config']['strict_heartbeat'] = strict_heartbeat
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
+
+    header = _read_generated(tmpdir, 'mcu_output/protocol.h')
+    cpp_cfg = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_config.hpp')
+    expected_macro = '1' if strict_heartbeat else '0'
+    expected_const = 'true' if strict_heartbeat else 'false'
+
+    assert f"CFG_STRICT_HEARTBEAT {expected_macro}" in header
+    assert f"constexpr bool STRICT_HEARTBEAT = {expected_const};" in cpp_cfg
+
+
+@pytest.mark.parametrize("heartbeat_timeout_ms", [1, 3000, 10000])
+def test_heartbeat_timeout_config_propagates_to_generated_headers(heartbeat_timeout_ms, tmpdir):
+    cfg = _load_sample_config()
+    cfg['config']['heartbeat_timeout_ms'] = heartbeat_timeout_ms
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
+
+    header = _read_generated(tmpdir, 'mcu_output/protocol.h')
+    cpp_cfg = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_config.hpp')
+
+    assert f"CFG_HEARTBEAT_TIMEOUT_MS {heartbeat_timeout_ms}" in header
+    assert f"constexpr int HEARTBEAT_TIMEOUT_MS = {heartbeat_timeout_ms};" in cpp_cfg
+
+
+@pytest.mark.parametrize(
+    ("retry_interval_ms", "max_retries"),
+    [(50, 1), (100, 3), (250, 5)],
+)
+def test_reliable_retry_config_propagates_to_generated_headers(retry_interval_ms, max_retries, tmpdir):
+    cfg = _load_sample_config()
+    cfg['config']['reliable_retry_interval_ms'] = retry_interval_ms
+    cfg['config']['reliable_max_retries'] = max_retries
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
+
+    header = _read_generated(tmpdir, 'mcu_output/protocol.h')
+    cpp_cfg = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_config.hpp')
+
+    assert f"CFG_RELIABLE_RETRY_INTERVAL_MS {retry_interval_ms}" in header
+    assert f"CFG_RELIABLE_MAX_RETRIES {max_retries}" in header
+    assert f"constexpr int RELIABLE_RETRY_INTERVAL_MS = {retry_interval_ms};" in cpp_cfg
+    assert f"constexpr int RELIABLE_MAX_RETRIES = {max_retries};" in cpp_cfg
 
 
 # ============================================================================
@@ -396,7 +466,34 @@ def test_generated_bindings_add_loopback_guard_for_same_topic_both(tmpdir):
         '生成的发布者应向节点登记，用于回环抑制'
 
 
-def test_sample_config_heartbeat_is_tx_only(tmpdir):
+def test_generated_bindings_guard_int32_multiarray_to_u8_range_and_cast_output(tmpdir):
+    cfg = _load_sample_config()
+    cfg['messages'].append({
+        'name': 'GenericStatusMirror',
+        'id': 0x44,
+        'direction': 'both',
+        'sub_topic': '/generic_status_mirror',
+        'pub_topic': '/generic_status_mirror',
+        'ros_msg': 'std_msgs/msg/Int32MultiArray',
+        'fields': [
+            {'proto': 'task_id', 'type': 'u8', 'ros': 'data[0]'},
+            {'proto': 'status', 'type': 'u8', 'ros': 'data[1]'},
+        ],
+    })
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
+
+    content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
+    assert 'field task_id is out of uint8 range [0, 255]' in content
+    assert 'field status is out of uint8 range [0, 255]' in content
+    assert 'pkt.task_id = static_cast<uint8_t>(msg->data[0]);' in content
+    assert 'pkt.status = static_cast<uint8_t>(msg->data[1]);' in content
+    assert 'msg.data[0] = static_cast<int32_t>(pkt->task_id);' in content
+    assert 'msg.data[1] = static_cast<int32_t>(pkt->status);' in content
+
+
+def test_sample_config_heartbeat_is_both(tmpdir):
     cfg = _load_sample_config()
 
     result = _run_codegen(cfg, tmpdir)
@@ -406,16 +503,318 @@ def test_sample_config_heartbeat_is_tx_only(tmpdir):
     protocol_doc = _read_generated(tmpdir, 'mcu_output/PROTOCOL_DOC.md')
     rx_section = protocol_doc.split('## 电控 → ROS（电控主动发送）', 1)[1].split('## ROS → 电控（电控被动接收）', 1)[0]
 
-    assert 'pub_Heartbeat' not in content
-    assert 'case PACKET_ID_HEARTBEAT' not in content
-    assert 'register_loopback_publisher(PACKET_ID_HEARTBEAT' not in content
+    assert 'pub_Heartbeat' in content
+    assert 'case PACKET_ID_HEARTBEAT' in content
+    assert 'register_loopback_publisher(PACKET_ID_HEARTBEAT' in content
     assert 'Heartbeat (ROS -> MCU)' in content
-    assert '### `Heartbeat`' not in rx_section
+    assert '### `Heartbeat`' in rx_section
 
 
-def test_mcu_source_auto_replies_handshake_when_enabled(tmpdir):
+def test_message_debug_log_mode_off_suppresses_generated_rx_tx_debug(tmpdir):
+    cfg = _load_sample_config()
+    for msg in cfg['messages']:
+        msg['debug_log_mode'] = 'off'
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
+
+    content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
+    assert 'RCLCPP_DEBUG(node->get_logger(), "TX ' not in content
+    assert 'RCLCPP_DEBUG(logger, "RX ' not in content
+
+
+def test_message_debug_log_mode_on_change_generates_tx_change_gate(tmpdir):
+    cfg = _load_sample_config()
+    for msg in cfg['messages']:
+        msg['debug_log_mode'] = 'off'
+
+    target_msg = next(
+        (msg for msg in cfg['messages'] if msg.get('direction') in ('tx', 'both')),
+        None,
+    )
+    assert target_msg is not None, 'sample config should include at least one tx/both message'
+    target_msg['debug_log_mode'] = 'on_change'
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
+
+    content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
+    message_name = target_msg['name']
+    upper_name = message_name.upper()
+    assert f'static bool has_previous_pkt_{message_name} = false;' in content
+    assert f'static Packet_{message_name} previous_pkt_{message_name}{{}};' in content
+    assert (
+        f'const bool should_log_{message_name} = !has_previous_pkt_{message_name} || '
+        f'std::memcmp(&previous_pkt_{message_name}, &pkt, sizeof(Packet_{message_name})) != 0;'
+    ) in content
+    assert f'if (should_log_{message_name}) {{' in content
+    assert f'RCLCPP_DEBUG(node->get_logger(), "TX {message_name}:' in content
+    assert f'PACKET_ID_{upper_name}' in content
+
+
+def test_message_debug_log_mode_on_change_generates_rx_change_gate(tmpdir):
+    cfg = _load_sample_config()
+    for msg in cfg['messages']:
+        msg['debug_log_mode'] = 'off'
+
+    target_msg = next(
+        (msg for msg in cfg['messages'] if msg.get('direction') in ('rx', 'both')),
+        None,
+    )
+    assert target_msg is not None, 'sample config should include at least one rx/both message'
+    target_msg['debug_log_mode'] = 'on_change'
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
+
+    content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
+    message_name = target_msg['name']
+    assert (
+        f'const bool should_log_{message_name} = !has_previous_pkt_{message_name} || '
+        f'std::memcmp(&previous_pkt_{message_name}, pkt, sizeof(Packet_{message_name})) != 0;'
+    ) in content
+    assert f'previous_pkt_{message_name} = *pkt;' in content
+    assert f'RCLCPP_DEBUG(logger, "RX {message_name}:' in content
+
+
+def test_message_debug_log_mode_missing_defaults_to_on_change(tmpdir):
+    cfg = _load_sample_config()
+    cfg['messages'][0].pop('debug_log_mode', None)
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
+
+    content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
+    assert 'std::memcmp(&previous_pkt_Ack, &pkt, sizeof(Packet_Ack)) != 0' in content
+
+
+def test_message_debug_log_mode_invalid_value_fails_codegen(tmpdir):
+    cfg = _load_sample_config()
+    cfg['messages'][0]['debug_log_mode'] = 'always'
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode != 0
+    combined_output = f"{result.stdout}\n{result.stderr}"
+    assert 'invalid debug_log_mode' in combined_output
+
+
+def test_codegen_uses_size_t_checksum_signature_and_buffer_size_1024(tmpdir):
+    cfg = _load_sample_config()
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
+
+    header = _read_generated(tmpdir, 'mcu_output/protocol.h')
+    source = _read_generated(tmpdir, 'mcu_output/protocol.c')
+    cpp_cfg = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_config.hpp')
+
+    assert 'uint8_t calculate_checksum(const uint8_t* data, size_t len);' in header
+    assert 'uint8_t calculate_checksum(const uint8_t* data, size_t len) {' in source
+    assert 'for (size_t i = 0; i < len; i++) {' in source
+    assert 'static uint8_t rx_buffer[1024];' in source
+    assert 'constexpr size_t BUFFER_SIZE = 1024;' in cpp_cfg
+
+
+def test_protocol_hash_ignores_whitespace_comments_and_mapping_order(tmpdir):
+    yaml_a = """
+serial_controller:
+  ros__parameters:
+    port: "/dev/stm32"
+    baudrate: 115200
+    timeout: 0.1
+config:
+  baudrate: 115200
+  buffer_size: 256
+  head_byte_1: 0x5A
+  head_byte_2: 0xA5
+  checksum: "CRC8"
+  require_handshake: true
+  ignore_version_mismatch: true
+  enable_heartbeat: false
+  qos_depth: 10
+  heartbeat_timeout_ms: 3000
+type_mappings:
+  f32: "float"
+  u32: "uint32_t"
+messages:
+  - name: "Handshake"
+    id: 0xFF
+    direction: "both"
+    sub_topic: "/task/handshake"
+    pub_topic: "/task/handshake"
+    ros_msg: "std_msgs/msg/UInt32"
+    fields:
+      - { proto: "protocol_hash", type: "u32", ros: "data" }
+"""
+    yaml_b = """
+# same protocol, only formatting / comments / mapping order changed
+type_mappings:
+  u32: "uint32_t"
+  f32: "float"
+
+config:
+  heartbeat_timeout_ms: 3000
+  qos_depth: 10
+  enable_heartbeat: false
+  ignore_version_mismatch: true
+  require_handshake: true
+  checksum: "CRC8"
+  head_byte_2: 0xA5
+  head_byte_1: 0x5A
+  buffer_size: 256
+  baudrate: 115200
+
+messages:
+  - ros_msg: "std_msgs/msg/UInt32"
+    pub_topic: "/task/handshake"
+    sub_topic: "/task/handshake"
+    direction: "both"
+    id: 0xFF
+    name: "Handshake"
+    fields:
+      - { ros: "data", type: "u32", proto: "protocol_hash" }
+
+serial_controller:
+  ros__parameters:
+    timeout: 0.1
+    baudrate: 115200
+    port: "/dev/stm32"
+"""
+
+    result_a = _run_codegen_text(yaml_a, tmpdir)
+    assert result_a.returncode == 0, f"codegen failed:\n{result_a.stdout}\n{result_a.stderr}"
+    hash_a = _extract_protocol_hash(_read_generated(tmpdir, 'mcu_output/protocol.h'))
+
+    alt_dir = tempfile.mkdtemp(prefix='codegen_norm_')
+    try:
+        result_b = _run_codegen_text(yaml_b, alt_dir)
+        assert result_b.returncode == 0, f"codegen failed:\n{result_b.stdout}\n{result_b.stderr}"
+        hash_b = _extract_protocol_hash(_read_generated(alt_dir, 'mcu_output/protocol.h'))
+    finally:
+        shutil.rmtree(alt_dir, ignore_errors=True)
+
+    assert hash_a == hash_b, \
+        "仅空白、注释和 mapping 键顺序变化时，PROTOCOL_HASH 应保持一致"
+
+
+def test_protocol_hash_changes_when_message_order_changes(tmpdir):
+    yaml_a = """
+serial_controller:
+  ros__parameters: {port: "/dev/stm32", baudrate: 115200, timeout: 0.1}
+config:
+  baudrate: 115200
+  buffer_size: 256
+  head_byte_1: 0x5A
+  head_byte_2: 0xA5
+  checksum: "CRC8"
+  require_handshake: true
+  ignore_version_mismatch: true
+  enable_heartbeat: false
+  qos_depth: 10
+  heartbeat_timeout_ms: 3000
+type_mappings:
+  u32: "uint32_t"
+messages:
+  - name: "Foo"
+    id: 0x01
+    direction: "tx"
+    sub_topic: "/foo"
+    ros_msg: "std_msgs/msg/UInt32"
+    fields:
+      - { proto: "data", type: "u32", ros: "data" }
+  - name: "Bar"
+    id: 0x02
+    direction: "rx"
+    pub_topic: "/bar"
+    ros_msg: "std_msgs/msg/UInt32"
+    fields:
+      - { proto: "data", type: "u32", ros: "data" }
+"""
+    yaml_b = """
+serial_controller:
+  ros__parameters: {port: "/dev/stm32", baudrate: 115200, timeout: 0.1}
+config:
+  baudrate: 115200
+  buffer_size: 256
+  head_byte_1: 0x5A
+  head_byte_2: 0xA5
+  checksum: "CRC8"
+  require_handshake: true
+  ignore_version_mismatch: true
+  enable_heartbeat: false
+  qos_depth: 10
+  heartbeat_timeout_ms: 3000
+type_mappings:
+  u32: "uint32_t"
+messages:
+  - name: "Bar"
+    id: 0x02
+    direction: "rx"
+    pub_topic: "/bar"
+    ros_msg: "std_msgs/msg/UInt32"
+    fields:
+      - { proto: "data", type: "u32", ros: "data" }
+  - name: "Foo"
+    id: 0x01
+    direction: "tx"
+    sub_topic: "/foo"
+    ros_msg: "std_msgs/msg/UInt32"
+    fields:
+      - { proto: "data", type: "u32", ros: "data" }
+"""
+
+    result_a = _run_codegen_text(yaml_a, tmpdir)
+    assert result_a.returncode == 0, f"codegen failed:\n{result_a.stdout}\n{result_a.stderr}"
+    hash_a = _extract_protocol_hash(_read_generated(tmpdir, 'mcu_output/protocol.h'))
+
+    alt_dir = tempfile.mkdtemp(prefix='codegen_order_')
+    try:
+        result_b = _run_codegen_text(yaml_b, alt_dir)
+        assert result_b.returncode == 0, f"codegen failed:\n{result_b.stdout}\n{result_b.stderr}"
+        hash_b = _extract_protocol_hash(_read_generated(alt_dir, 'mcu_output/protocol.h'))
+    finally:
+        shutil.rmtree(alt_dir, ignore_errors=True)
+
+    assert hash_a != hash_b, \
+        "messages 列表顺序变化应视为真实协议变化，PROTOCOL_HASH 不应保持一致"
+
+
+@pytest.mark.parametrize("ignore_version_mismatch", [True, False])
+def test_ignore_version_mismatch_config_propagates_to_generated_headers(ignore_version_mismatch, tmpdir):
+    cfg = _load_sample_config()
+    cfg['config']['ignore_version_mismatch'] = ignore_version_mismatch
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
+
+    header = _read_generated(tmpdir, 'mcu_output/protocol.h')
+    cpp_cfg = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_config.hpp')
+    expected_macro = '1' if ignore_version_mismatch else '0'
+    expected_const = 'true' if ignore_version_mismatch else 'false'
+
+    assert f"CFG_IGNORE_VERSION_MISMATCH {expected_macro}" in header
+    assert f"constexpr bool IGNORE_VERSION_MISMATCH = {expected_const};" in cpp_cfg
+
+
+def test_mcu_source_auto_replies_handshake_on_mismatch_when_ignore_enabled(tmpdir):
     cfg = _load_sample_config()
     cfg['config']['require_handshake'] = True
+    cfg['config']['ignore_version_mismatch'] = True
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
+
+    content = _read_generated(tmpdir, 'mcu_output/protocol.c')
+    body = _extract_function_body(content, 'on_receive_Handshake')
+
+    assert 'send_Handshake(pkt);' in body
+    assert 'if (pkt->protocol_hash == PROTOCOL_HASH)' not in body
+
+
+def test_mcu_source_requires_hash_match_when_ignore_disabled(tmpdir):
+    cfg = _load_sample_config()
+    cfg['config']['require_handshake'] = True
+    cfg['config']['ignore_version_mismatch'] = False
 
     result = _run_codegen(cfg, tmpdir)
     assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"

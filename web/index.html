@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>协议配置器</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #1e293b;
+        --panel-alt: #162033;
+        --card: #334155;
+        --card-soft: #273449;
+        --border: rgba(148, 163, 184, 0.24);
+        --text: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #22c55e;
+        --accent-strong: #16a34a;
+        --danger: #ef4444;
+        --danger-soft: rgba(239, 68, 68, 0.14);
+        --warning: #f59e0b;
+        --shadow: 0 24px 60px rgba(2, 6, 23, 0.45);
+        --radius: 18px;
+        --radius-sm: 10px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background:
+          radial-gradient(circle at top left, rgba(34, 197, 94, 0.08), transparent 32%),
+          radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 28%),
+          linear-gradient(180deg, #09111f 0%, var(--bg) 45%, #081120 100%);
+        color: var(--text);
+        font-family: "Fira Sans", "Noto Sans SC", "PingFang SC", sans-serif;
+      }
+
+      body {
+        padding: 24px;
+      }
+
+      button,
+      input,
+      select,
+      textarea {
+        font: inherit;
+      }
+
+      button {
+        border: 0;
+        cursor: pointer;
+      }
+
+      .shell {
+        width: min(1500px, 100%);
+        margin: 0 auto;
+        display: grid;
+        gap: 20px;
+      }
+
+      .toolbar,
+      .panel,
+      .messages-panel,
+      .preview-panel {
+        background: linear-gradient(180deg, rgba(30, 41, 59, 0.98), rgba(15, 23, 42, 0.98));
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+      }
+
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 18px;
+        padding: 22px 24px;
+      }
+
+      .toolbar h1 {
+        margin: 0;
+        font-size: clamp(1.6rem, 2vw, 2.2rem);
+        line-height: 1.1;
+      }
+
+      .toolbar p {
+        margin: 8px 0 0;
+        color: var(--text-muted);
+        max-width: 760px;
+      }
+
+      .toolbar-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: flex-start;
+      }
+
+      .layout {
+        display: grid;
+        gap: 20px;
+        grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+      }
+
+      .panel,
+      .messages-panel,
+      .preview-panel {
+        padding: 20px;
+      }
+
+      .panel h2,
+      .messages-panel h2,
+      .preview-panel h2 {
+        margin: 0 0 16px;
+        font-size: 1.1rem;
+      }
+
+      .panel h3,
+      .messages-panel h3 {
+        margin: 0 0 12px;
+        font-size: 0.95rem;
+        letter-spacing: 0.02em;
+        color: var(--text-muted);
+        text-transform: uppercase;
+      }
+
+      .section-stack {
+        display: grid;
+        gap: 18px;
+      }
+
+      .card {
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(51, 65, 85, 0.42), rgba(15, 23, 42, 0.42));
+        padding: 16px;
+      }
+
+      .field-grid {
+        display: grid;
+        gap: 12px;
+      }
+
+      .two-col {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .three-col {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        font-size: 0.92rem;
+        color: var(--text-muted);
+      }
+
+      input,
+      select,
+      textarea,
+      pre {
+        width: 100%;
+        color: var(--text);
+        background: rgba(15, 23, 42, 0.92);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: var(--radius-sm);
+      }
+
+      input,
+      select,
+      textarea {
+        padding: 11px 12px;
+      }
+
+      textarea {
+        min-height: 110px;
+        resize: vertical;
+      }
+
+      pre,
+      .mono {
+        font-family: "Fira Code", "SFMono-Regular", monospace;
+      }
+
+      .button {
+        padding: 11px 14px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.14);
+        color: var(--text);
+        transition: 180ms ease;
+      }
+
+      .button:hover:not(:disabled) {
+        transform: translateY(-1px);
+        background: rgba(148, 163, 184, 0.22);
+      }
+
+      .button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      .button-primary {
+        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+        color: #04110a;
+        font-weight: 700;
+      }
+
+      .button-danger {
+        background: rgba(239, 68, 68, 0.14);
+        color: #fecaca;
+      }
+
+      .button-ghost {
+        background: transparent;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+      }
+
+      .stack-inline {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .toggle-switch-container {
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        user-select: none;
+      }
+
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 44px;
+        height: 24px;
+      }
+
+      .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .toggle-switch .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: var(--card-soft);
+        border: 1px solid rgba(148, 163, 184, 0.4);
+        transition: 0.3s cubic-bezier(0.4, 0.0, 0.2, 1);
+        border-radius: 24px;
+      }
+
+      .toggle-switch .slider:before {
+        position: absolute;
+        content: "";
+        height: 18px;
+        width: 18px;
+        left: 2px;
+        bottom: 2px;
+        background-color: var(--text-muted);
+        transition: 0.3s cubic-bezier(0.4, 0.0, 0.2, 1);
+        border-radius: 50%;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+      }
+
+      .toggle-switch input:checked + .slider {
+        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+        border-color: var(--accent);
+      }
+
+      .toggle-switch input:checked + .slider:before {
+        transform: translateX(20px);
+        background-color: #04110a;
+      }
+
+      .toggle-switch input:focus-visible + .slider {
+        box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.25);
+      }
+
+
+      .status {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        margin-top: 14px;
+      }
+
+      .pill {
+        padding: 7px 12px;
+        border-radius: 999px;
+        font-size: 0.85rem;
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        background: rgba(15, 23, 42, 0.6);
+      }
+
+      .pill-ok {
+        color: #bbf7d0;
+        border-color: rgba(34, 197, 94, 0.35);
+        background: rgba(34, 197, 94, 0.14);
+      }
+
+      .pill-warning {
+        color: #fde68a;
+        border-color: rgba(245, 158, 11, 0.3);
+        background: rgba(245, 158, 11, 0.1);
+      }
+
+      .hint {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+        line-height: 1.45;
+      }
+
+      .messages-panel {
+        display: grid;
+        gap: 18px;
+      }
+
+      .panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .message-list {
+        display: grid;
+        gap: 16px;
+      }
+
+      .message-card {
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 18px;
+        background:
+          linear-gradient(180deg, rgba(51, 65, 85, 0.26), rgba(8, 17, 32, 0.68)),
+          linear-gradient(120deg, rgba(34, 197, 94, 0.06), transparent 42%);
+        overflow: hidden;
+      }
+
+      .message-card-header {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        padding: 16px 18px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+      }
+
+      .message-card-body {
+        display: grid;
+        gap: 16px;
+        padding: 18px;
+      }
+
+      .message-title {
+        display: grid;
+        gap: 4px;
+      }
+
+      .message-title strong {
+        font-size: 1rem;
+      }
+
+      .message-title span {
+        font-size: 0.86rem;
+        color: var(--text-muted);
+      }
+
+      .field-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(120px, 180px) minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: end;
+      }
+
+      .field-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .field-list-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .error-box {
+        border-radius: 14px;
+        padding: 14px 16px;
+        border: 1px solid rgba(239, 68, 68, 0.32);
+        background: linear-gradient(180deg, rgba(239, 68, 68, 0.14), rgba(15, 23, 42, 0.6));
+      }
+
+      .error-box h3 {
+        margin: 0 0 10px;
+        color: #fecaca;
+      }
+
+      .error-box ul {
+        margin: 0;
+        padding-left: 18px;
+        color: #fecaca;
+        display: grid;
+        gap: 6px;
+      }
+
+      .preview-panel {
+        display: grid;
+        gap: 14px;
+      }
+
+      #yaml-preview {
+        margin: 0;
+        padding: 18px;
+        overflow: auto;
+        min-height: 280px;
+        max-height: 520px;
+        line-height: 1.5;
+      }
+
+      .empty-state {
+        border: 1px dashed rgba(148, 163, 184, 0.22);
+        border-radius: 16px;
+        padding: 24px;
+        text-align: center;
+        color: var(--text-muted);
+      }
+
+      .floating-add {
+        position: fixed;
+        right: 28px;
+        bottom: 28px;
+        width: 62px;
+        height: 62px;
+        border-radius: 50%;
+        display: inline-grid;
+        place-items: center;
+        font-size: 1.8rem;
+        line-height: 1;
+        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+        color: #04110a;
+        box-shadow: 0 18px 45px rgba(34, 197, 94, 0.28);
+      }
+
+      .floating-add:hover {
+        transform: translateY(-2px) scale(1.02);
+      }
+
+      @media (max-width: 1100px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 760px) {
+        body {
+          padding: 16px;
+        }
+
+        .toolbar,
+        .panel,
+        .messages-panel,
+        .preview-panel {
+          padding: 16px;
+        }
+
+        .field-grid.two-col,
+        .field-grid.three-col,
+        .field-row {
+          grid-template-columns: 1fr;
+        }
+
+        .floating-add {
+          right: 18px;
+          bottom: 18px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <section class="toolbar">
+        <div>
+          <h1>协议配置器</h1>
+          <p>
+            离线编辑 <span class="mono">auto_serial_bridge</span> 协议配置，
+            修改后导出 YAML 替换 <span class="mono">config/protocol.yaml</span>。
+          </p>
+          <div class="status">
+            <span id="validation-pill" class="pill pill-warning">等待导入或编辑</span>
+            <span id="message-count-pill" class="pill">0 条消息</span>
+            <span id="source-pill" class="pill">未导入文件</span>
+          </div>
+        </div>
+        <div class="toolbar-actions">
+          <input id="import-input" type="file" accept=".yaml,.yml,text/yaml,text/x-yaml" hidden />
+          <button id="import-button" class="button">导入 YAML</button>
+          <button id="export-button" class="button button-primary">导出 YAML</button>
+          <button id="reset-button" class="button button-ghost">重置</button>
+        </div>
+      </section>
+
+      <div class="layout">
+        <section class="panel section-stack">
+          <div class="card">
+            <h2>全局参数</h2>
+            <div id="global-form" class="field-grid"></div>
+          </div>
+          <div class="card">
+            <h2>校验结果</h2>
+            <div id="error-summary" class="hint">当前没有校验结果。</div>
+          </div>
+        </section>
+
+        <section class="messages-panel">
+          <div class="panel-header">
+            <div>
+              <h2>消息编辑器</h2>
+              <div class="hint">仅可编辑自定义消息；系统消息（Ack/Heartbeat/Handshake）固定且只在 YAML 预览/导出中显示。</div>
+            </div>
+            <button id="add-message-button" class="button">添加消息</button>
+          </div>
+          <div id="message-list" class="message-list"></div>
+        </section>
+      </div>
+
+      <section class="preview-panel">
+        <div class="panel-header">
+          <div>
+            <h2>YAML 预览</h2>
+            <div class="hint">固定顺序序列化，保留十六进制格式，不保留原注释。</div>
+          </div>
+        </div>
+        <pre id="yaml-preview" class="mono"></pre>
+      </section>
+    </div>
+
+    <button id="floating-add-button" class="floating-add" title="添加消息" aria-label="添加消息">+</button>
+
+    <script src="./vendor/js-yaml.min.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
