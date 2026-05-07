@@ -15,7 +15,7 @@ namespace config {
     enum class ChecksumAlgo { NONE, SUM8, XOR8, CRC8 };
     constexpr ChecksumAlgo CHECKSUM_ALGO = ChecksumAlgo::CRC8;
 
-    constexpr bool REQUIRE_HANDSHAKE = true;
+    constexpr bool REQUIRE_HANDSHAKE = false;
     constexpr bool IGNORE_VERSION_MISMATCH = true;
     constexpr bool ENABLE_HEARTBEAT = true;
     constexpr bool STRICT_HEARTBEAT = true;
@@ -58,6 +58,24 @@ namespace config {
             case PACKET_ID_GENERICSTATUSTX: return true;
             case PACKET_ID_GENERICSTATUSRX: return false;
             default: return false;
+        }
+    }
+
+    inline constexpr bool is_debug_log_enabled(PacketID id) {
+        switch (id) {
+            case PACKET_ID_ACK: return true;
+            case PACKET_ID_HEARTBEAT: return false;
+            case PACKET_ID_HANDSHAKE: return true;
+            case PACKET_ID_CMDVEL: return false;
+            case PACKET_ID_GRIPPERCONTROLGOAL: return true;
+            case PACKET_ID_WEAPONDOCKGOAL: return true;
+            case PACKET_ID_MLCONTROLTX: return true;
+            case PACKET_ID_MERLINPICKGOAL: return true;
+            case PACKET_ID_GRIDPLACEGOAL: return true;
+            case PACKET_ID_GRIDATTACKGOAL: return true;
+            case PACKET_ID_GENERICSTATUSTX: return true;
+            case PACKET_ID_GENERICSTATUSRX: return true;
+            default: return true;
         }
     }
 

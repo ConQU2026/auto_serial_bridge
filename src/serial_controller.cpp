@@ -412,11 +412,14 @@ namespace auto_serial_bridge
           awaiting_heartbeat_ack_ = false;
           heartbeat_ack_received_ = true;
           last_heartbeat_ack_time_ = std::chrono::steady_clock::now();
-          RCLCPP_DEBUG(
-              this->get_logger(),
-              "Heartbeat ACK matched: count=%u, state=%s",
-              data->count,
-              state_name());
+          if constexpr (config::is_debug_log_enabled(PACKET_ID_HEARTBEAT))
+          {
+            RCLCPP_DEBUG(
+                this->get_logger(),
+                "Heartbeat ACK matched: count=%u, state=%s",
+                data->count,
+                state_name());
+          }
         }
         else
         {
@@ -466,7 +469,10 @@ namespace auto_serial_bridge
     {
       if (pkt.id == PACKET_ID_HANDSHAKE)
       {
-        process_handshake(pkt);
+        if (state_ == State::WAITING_HANDSHAKE)
+        {
+          process_handshake(pkt);
+        }
         auto_serial_bridge::generated::dispatch_packet(
             *pubs, static_cast<uint8_t>(pkt.id), dispatch_payload, this->get_logger());
       }
@@ -487,7 +493,7 @@ namespace auto_serial_bridge
     }
     else
     {
-      if (pkt.id == PACKET_ID_HANDSHAKE)
+      if (pkt.id == PACKET_ID_HANDSHAKE && state_ != State::RUNNING)
       {
         process_handshake(pkt);
       }

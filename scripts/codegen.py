@@ -366,10 +366,7 @@ uint8_t calculate_checksum(const uint8_t* data, size_t len) {
             if msg['name'] == 'Heartbeat' and enable_heartbeat:
                 f.write("    // Default system behavior: ack the latest heartbeat with the same count.\n")
                 f.write("    send_Heartbeat(pkt);\n")
-            if msg.get('reliable', False) and msg.get('direction') in ('tx', 'both'):
-                f.write("    // Default system behavior: ack reliable command reception.\n")
-                f.write("    // If this callback is overridden, call send_reliable_ack() manually in user code.\n")
-                f.write(f"    send_reliable_ack(PACKET_ID_{msg['name'].upper()});\n")
+            # ACK 已由协议层 FSM 自动发送，回调中无需处理
             f.write(render_block(user_blocks, func_name))
             f.write("}\n")
 
@@ -447,8 +444,10 @@ void protocol_fsm_feed(uint8_t byte) {{
             f.write(f"                    case PACKET_ID_{msg['name'].upper()}:\n")
             if msg.get('reliable', False):
                 # reliable 包: ROS 端会在 payload 末尾追加 1 字节 seq
+                # ACK 在协议层自动发送，用户回调无需关心
                 f.write(f"                        if (rx_data_len == sizeof(Packet_{msg['name']}) + 1) {{\n")
                 f.write(f"                            g_last_reliable_seq = rx_buffer[sizeof(Packet_{msg['name']})];//提取seq\n")
+                f.write(f"                            send_reliable_ack(PACKET_ID_{msg['name'].upper()});\n")
                 f.write(f"                            on_receive_{msg['name']}((Packet_{msg['name']}*)rx_buffer);\n")
                 f.write(f"                        }}\n")
             else:
@@ -894,6 +893,18 @@ def generate_cpp_config(config, messages, type_mappings, output_path):
             reliable = 'true' if msg.get('reliable', False) else 'false'
             f.write(f"            case PACKET_ID_{msg['name'].upper()}: return {reliable};\n")
         f.write("            default: return false;\n")
+        f.write("        }\n")
+        f.write("    }\n")
+
+        # 生成 debug_log_mode 查询函数，供手写代码判断是否输出 debug 日志
+        f.write("\n")
+        f.write("    inline constexpr bool is_debug_log_enabled(PacketID id) {\n")
+        f.write("        switch (id) {\n")
+        for msg in messages:
+            mode = msg.get('debug_log_mode', 'on_change')
+            enabled = 'false' if mode == 'off' else 'true'
+            f.write(f"            case PACKET_ID_{msg['name'].upper()}: return {enabled};\n")
+        f.write("            default: return true;\n")
         f.write("        }\n")
         f.write("    }\n")
 
