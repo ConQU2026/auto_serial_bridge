@@ -24,8 +24,8 @@ def generate_launch_description():
         parameters=[node_params],
         arguments=[
             '--ros-args',
-            '--log-level', 'info',
-            '--log-level', 'serial_controller:=debug'
+            '--log-level', 'serial_controller:=debug',
+            '--log-level', 'rcl:=info',
         ]
     )
     
