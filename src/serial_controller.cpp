@@ -1,5 +1,6 @@
 #include <chrono>
 #include <future>
+#include <sstream>
 
 #include "auto_serial_bridge/generated_bindings.hpp"
 #include "auto_serial_bridge/generated_config.hpp"
@@ -137,7 +138,7 @@ namespace auto_serial_bridge
 
   void SerialController::get_parameters()
   {
-    this->declare_parameter<std::string>("port", "/dev/ttyUSB0");
+    this->declare_parameter<std::string>("port", auto_serial_bridge::config::DEFAULT_PORT);
     this->declare_parameter<int>("baudrate", auto_serial_bridge::config::DEFAULT_BAUDRATE);
     this->declare_parameter<double>("timeout", 0.1);
 
@@ -334,11 +335,12 @@ namespace auto_serial_bridge
       return;
     }
 
-    port->async_receive(serial_strand_->wrap(
+    port->async_receive(
         [this, port](const std::vector<uint8_t> &buffer, const size_t bytes_read)
         {
-          handle_receive(port, buffer, bytes_read);
-        }));
+          post_serial([this, port, buffer, bytes_read]()
+                      { handle_receive(port, buffer, bytes_read); });
+        });
   }
 
   size_t SerialController::ingest_received_bytes(const uint8_t *data, size_t len)
@@ -579,6 +581,52 @@ namespace auto_serial_bridge
                 });
   }
 
+
+  void SerialController::log_stm32_tx(const std::vector<uint8_t> &packet_bytes) const
+  {
+    if (packet_bytes.size() < 5)
+    {
+      RCLCPP_INFO(
+          this->get_logger(),
+          "[STM32 TX RAW] %s",
+          detail::format_hex_payload(packet_bytes.data(), packet_bytes.size(), packet_bytes.size()).c_str());
+      RCLCPP_INFO(this->get_logger(), "[STM32 TX DECODED] malformed frame: size=%zu", packet_bytes.size());
+      return;
+    }
+
+    const uint8_t id = packet_bytes[2];
+    const uint8_t payload_len = packet_bytes[3];
+    const size_t payload_offset = 4;
+    const size_t checksum_size = 1;
+    const size_t expected_size = payload_offset + payload_len + checksum_size;
+
+    RCLCPP_INFO(
+        this->get_logger(),
+        "[STM32 TX RAW] %s",
+        detail::format_hex_payload(packet_bytes.data(), packet_bytes.size(), packet_bytes.size()).c_str());
+
+    if (packet_bytes.size() != expected_size)
+    {
+      RCLCPP_INFO(
+          this->get_logger(),
+          "[STM32 TX DECODED] packet_id=0x%02X, payload_len=%u, frame_size=%zu, expected_size=%zu",
+          static_cast<unsigned int>(id),
+          static_cast<unsigned int>(payload_len),
+          packet_bytes.size(),
+          expected_size);
+      return;
+    }
+
+    std::vector<uint8_t> payload(packet_bytes.begin() + payload_offset, packet_bytes.begin() + payload_offset + payload_len);
+    RCLCPP_INFO(
+        this->get_logger(),
+        "[STM32 TX DECODED] id=0x%02X, len=%u, checksum=0x%02X, %s",
+        static_cast<unsigned int>(id),
+        static_cast<unsigned int>(payload_len),
+        static_cast<unsigned int>(packet_bytes.back()),
+        auto_serial_bridge::generated::describe_packet(static_cast<PacketID>(id), payload).c_str());
+  }
+
   bool SerialController::async_send_impl(const std::vector<uint8_t> &packet_bytes)
   {
     if (!is_connected_ || !driver_)
@@ -611,6 +659,7 @@ namespace auto_serial_bridge
 
     try
     {
+      log_stm32_tx(packet_bytes);
       port->async_send(packet_bytes);
     }
     catch (const std::exception &e)

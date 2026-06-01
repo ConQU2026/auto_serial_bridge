@@ -186,6 +186,7 @@ namespace auto_serial_bridge
     void start_receive();
     void async_send(const std::vector<uint8_t> &packet_bytes);
     bool async_send_impl(const std::vector<uint8_t> &packet_bytes);
+    void log_stm32_tx(const std::vector<uint8_t> &packet_bytes) const;
     void check_connection();
     void check_connection_impl();
     void reset_serial();
