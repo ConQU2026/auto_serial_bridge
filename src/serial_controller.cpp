@@ -141,18 +141,21 @@ namespace auto_serial_bridge
     this->declare_parameter<std::string>("port", auto_serial_bridge::config::DEFAULT_PORT);
     this->declare_parameter<int>("baudrate", auto_serial_bridge::config::DEFAULT_BAUDRATE);
     this->declare_parameter<double>("timeout", 0.1);
+    this->declare_parameter<bool>("debug_raw_frame", false);
 
     this->get_parameter("port", port_);
     int baudrate_temp = auto_serial_bridge::config::DEFAULT_BAUDRATE;
     this->get_parameter("baudrate", baudrate_temp);
     baudrate_ = static_cast<uint32_t>(baudrate_temp);
     this->get_parameter("timeout", timeout_);
+    this->get_parameter("debug_raw_frame", debug_raw_frame_);
 
     RCLCPP_INFO(
         this->get_logger(),
-        "Port: %s, Baudrate: %u, EnableHeartbeat: %s, StrictHeartbeat: %s, HeartbeatTimeout: %dms",
+        "Port: %s, Baudrate: %u, DebugRawFrame: %s, EnableHeartbeat: %s, StrictHeartbeat: %s, HeartbeatTimeout: %dms",
         port_.c_str(),
         baudrate_,
+        debug_raw_frame_ ? "true" : "false",
         enable_heartbeat_ ? "true" : "false",
         strict_heartbeat_ ? "true" : "false",
         heartbeat_timeout_ms_);
@@ -582,35 +585,49 @@ namespace auto_serial_bridge
   }
 
 
+  bool SerialController::should_log_stm32_tx_raw(PacketID id) const
+  {
+    const bool debug_log_enabled = config::is_debug_log_enabled(id);
+    return detail::should_log_raw_tx_frame(debug_raw_frame_, debug_log_enabled);
+  }
+
   void SerialController::log_stm32_tx(const std::vector<uint8_t> &packet_bytes) const
   {
+    const PacketID id = packet_bytes.size() > 2
+                            ? static_cast<PacketID>(packet_bytes[2])
+                            : static_cast<PacketID>(0);
+    const bool log_raw_frame = should_log_stm32_tx_raw(id);
     if (packet_bytes.size() < 5)
     {
-      RCLCPP_INFO(
-          this->get_logger(),
-          "[STM32 TX RAW] %s",
-          detail::format_hex_payload(packet_bytes.data(), packet_bytes.size(), packet_bytes.size()).c_str());
-      RCLCPP_INFO(this->get_logger(), "[STM32 TX DECODED] malformed frame: size=%zu", packet_bytes.size());
+      if (log_raw_frame)
+      {
+        RCLCPP_DEBUG(
+            this->get_logger(),
+            "[STM32 TX RAW] %s",
+            detail::format_hex_payload(packet_bytes.data(), packet_bytes.size(), packet_bytes.size()).c_str());
+      }
       return;
     }
 
-    const uint8_t id = packet_bytes[2];
     const uint8_t payload_len = packet_bytes[3];
     const size_t payload_offset = 4;
     const size_t checksum_size = 1;
     const size_t expected_size = payload_offset + payload_len + checksum_size;
 
-    RCLCPP_INFO(
-        this->get_logger(),
-        "[STM32 TX RAW] %s",
-        detail::format_hex_payload(packet_bytes.data(), packet_bytes.size(), packet_bytes.size()).c_str());
+    if (log_raw_frame)
+    {
+      RCLCPP_DEBUG(
+          this->get_logger(),
+          "[STM32 TX RAW] %s",
+          detail::format_hex_payload(packet_bytes.data(), packet_bytes.size(), packet_bytes.size()).c_str());
+    }
 
     if (packet_bytes.size() != expected_size)
     {
-      RCLCPP_INFO(
+      RCLCPP_DEBUG(
           this->get_logger(),
           "[STM32 TX DECODED] packet_id=0x%02X, payload_len=%u, frame_size=%zu, expected_size=%zu",
-          static_cast<unsigned int>(id),
+          static_cast<unsigned int>(static_cast<uint8_t>(id)),
           static_cast<unsigned int>(payload_len),
           packet_bytes.size(),
           expected_size);
@@ -621,7 +638,7 @@ namespace auto_serial_bridge
     RCLCPP_INFO(
         this->get_logger(),
         "[STM32 TX DECODED] id=0x%02X, len=%u, checksum=0x%02X, %s",
-        static_cast<unsigned int>(id),
+        static_cast<unsigned int>(static_cast<uint8_t>(id)),
         static_cast<unsigned int>(payload_len),
         static_cast<unsigned int>(packet_bytes.back()),
         auto_serial_bridge::generated::describe_packet(static_cast<PacketID>(id), payload).c_str());

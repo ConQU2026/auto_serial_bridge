@@ -189,7 +189,7 @@ def test_protocol_sample_yaml_contains_runtime_ros_section_for_launch_only():
     config = yaml.safe_load(PROTOCOL_SAMPLE_PATH.read_text())
     params = config["serial_controller"]["ros__parameters"]
 
-    assert list(params) == ["port", "baudrate", "timeout"]
+    assert list(params) == ["port", "baudrate", "timeout", "debug_raw_frame"]
     assert "&baudrate" not in PROTOCOL_SAMPLE_PATH.read_text()
     assert "*baudrate" not in PROTOCOL_SAMPLE_PATH.read_text()
 
@@ -198,9 +198,16 @@ def test_protocol_sample_yaml_is_protocol_only_without_ros_runtime_section():
     config = yaml.safe_load(PROTOCOL_SAMPLE_PATH.read_text())
 
     assert list(config) == ["serial_controller", "config", "type_mappings", "messages"]
-    assert list(config["serial_controller"]["ros__parameters"]) == ["port", "baudrate", "timeout"]
+    assert list(config["serial_controller"]["ros__parameters"]) == ["port", "baudrate", "timeout", "debug_raw_frame"]
     assert "&baudrate" not in PROTOCOL_SAMPLE_PATH.read_text()
     assert "*baudrate" not in PROTOCOL_SAMPLE_PATH.read_text()
+
+
+def test_serial_controller_declares_debug_raw_frame_runtime_parameter():
+    serial_controller = (REPO_ROOT / "src" / "serial_controller.cpp").read_text()
+
+    assert 'declare_parameter<bool>("debug_raw_frame", false)' in serial_controller
+    assert 'get_parameter("debug_raw_frame", debug_raw_frame_)' in serial_controller
 
 
 def test_readme_protocol_example_keeps_runtime_ros_section_in_protocol_yaml():
@@ -208,6 +215,7 @@ def test_readme_protocol_example_keeps_runtime_ros_section_in_protocol_yaml():
 
     assert "serial_controller:" in readme
     assert "ros__parameters:" in readme
+    assert "debug_raw_frame: false" in readme
     assert "&baudrate" not in readme
     assert "*baudrate" not in readme
 
@@ -247,6 +255,12 @@ def test_web_editor_exposes_fixed_system_message_examples():
     assert 'name: "Heartbeat"' in app_js
     assert 'name: "Handshake"' in app_js
     assert "系统消息（Ack/Heartbeat/Handshake）固定" in index_html
+
+
+def test_web_editor_preserves_debug_raw_frame_runtime_parameter():
+    app_js = WEB_APP_PATH.read_text()
+
+    assert "debug_raw_frame" in app_js
 
 
 def test_serial_controller_does_not_expose_heartbeat_runtime_overrides():

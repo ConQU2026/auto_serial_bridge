@@ -691,6 +691,7 @@ serial_controller:
     timeout: 0.1
     baudrate: 115200
     port: "/dev/stm32"
+    debug_raw_frame: true
 """
 
     result_a = _run_codegen_text(yaml_a, tmpdir)
@@ -706,7 +707,7 @@ serial_controller:
         shutil.rmtree(alt_dir, ignore_errors=True)
 
     assert hash_a == hash_b, \
-        "仅空白、注释和 mapping 键顺序变化时，PROTOCOL_HASH 应保持一致"
+        "仅空白、注释、mapping 键顺序和 debug_raw_frame 变化时，PROTOCOL_HASH 应保持一致"
 
 
 def test_protocol_hash_changes_when_message_order_changes(tmpdir):

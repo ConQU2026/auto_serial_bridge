@@ -10,6 +10,7 @@ using auto_serial_bridge::detail::format_hash_pair;
 using auto_serial_bridge::detail::format_hex_payload;
 using auto_serial_bridge::detail::heartbeat_mode_name;
 using auto_serial_bridge::detail::handshake_mode_name;
+using auto_serial_bridge::detail::should_log_raw_tx_frame;
 
 TEST(SerialControllerHelperTest, EmptyReadKeepsReceiveLoopAliveWhilePortIsOpen)
 {
@@ -87,4 +88,12 @@ TEST(SerialControllerHelperTest, HeartbeatModeNameSummarizesSelection)
   EXPECT_STREQ(heartbeat_mode_name(false, true), "disabled");
   EXPECT_STREQ(heartbeat_mode_name(true, true), "strict");
   EXPECT_STREQ(heartbeat_mode_name(true, false), "warn_only");
+}
+
+TEST(SerialControllerHelperTest, RawTxFrameLoggingRequiresParameterAndDebugLogMode)
+{
+  EXPECT_TRUE(should_log_raw_tx_frame(true, true));
+  EXPECT_FALSE(should_log_raw_tx_frame(false, true));
+  EXPECT_FALSE(should_log_raw_tx_frame(true, false));
+  EXPECT_FALSE(should_log_raw_tx_frame(false, false));
 }

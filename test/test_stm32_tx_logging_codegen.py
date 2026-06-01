@@ -31,6 +31,8 @@ def test_serial_controller_sources_include_raw_stm32_tx_logging():
     assert "log_stm32_tx" in header
     assert "STM32 TX RAW" in source
     assert "describe_packet" in source
+    assert "detail::should_log_raw_tx_frame(debug_raw_frame_, debug_log_enabled)" in source
+    assert "RCLCPP_DEBUG" in source
 
 
 def test_generated_default_port_comes_from_protocol_yaml():

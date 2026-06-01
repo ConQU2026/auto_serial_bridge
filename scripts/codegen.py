@@ -42,6 +42,7 @@ def canonicalize_protocol_hash_input(protocol_source):
         config_data = yaml.safe_load(protocol_source)
     else:
         config_data = protocol_source
+    config_data = _protocol_hash_input(config_data)
 
     return yaml.safe_dump(
         config_data,
@@ -49,6 +50,24 @@ def canonicalize_protocol_hash_input(protocol_source):
         default_flow_style=False,
         allow_unicode=True,
     )
+
+
+def _protocol_hash_input(config_data):
+    """Return hash input with ROS-only raw-frame logging removed."""
+    if not isinstance(config_data, dict):
+        return config_data
+
+    protocol_data = dict(config_data)
+    serial_controller = protocol_data.get('serial_controller')
+    if isinstance(serial_controller, dict):
+        serial_controller = dict(serial_controller)
+        ros_parameters = serial_controller.get('ros__parameters')
+        if isinstance(ros_parameters, dict):
+            ros_parameters = dict(ros_parameters)
+            ros_parameters.pop('debug_raw_frame', None)
+            serial_controller['ros__parameters'] = ros_parameters
+        protocol_data['serial_controller'] = serial_controller
+    return protocol_data
 
 
 def calculate_protocol_hash(protocol_source):

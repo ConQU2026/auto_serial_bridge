@@ -137,6 +137,11 @@ namespace auto_serial_bridge
       return strict_heartbeat ? "strict" : "warn_only";
     }
 
+    inline bool should_log_raw_tx_frame(bool debug_raw_frame, bool debug_log_enabled)
+    {
+      return debug_raw_frame && debug_log_enabled;
+    }
+
   } // namespace detail
 
   /**
@@ -187,6 +192,7 @@ namespace auto_serial_bridge
     void async_send(const std::vector<uint8_t> &packet_bytes);
     bool async_send_impl(const std::vector<uint8_t> &packet_bytes);
     void log_stm32_tx(const std::vector<uint8_t> &packet_bytes) const;
+    bool should_log_stm32_tx_raw(PacketID id) const;
     void check_connection();
     void check_connection_impl();
     void reset_serial();
@@ -246,6 +252,7 @@ namespace auto_serial_bridge
     std::string port_;
     uint32_t baudrate_;
     double timeout_;
+    bool debug_raw_frame_ = false;
 
     std::shared_ptr<generated::ProtocolPublishers> protocol_impl_;
   };

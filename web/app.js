@@ -18,6 +18,7 @@ const DEFAULT_PROTOCOL = Object.freeze({
       port: "/dev/stm32",
       baudrate: 115200,
       timeout: 0.1,
+      debug_raw_frame: false,
     },
   },
   config: {
@@ -258,6 +259,10 @@ export function normalizeProtocol(rawData = {}) {
     port: normalizeString(serialParameters.port || normalized.serial_controller.ros__parameters.port),
     baudrate: toFiniteNumber(serialParameters.baudrate, normalized.serial_controller.ros__parameters.baudrate),
     timeout: toFiniteNumber(serialParameters.timeout, normalized.serial_controller.ros__parameters.timeout),
+    debug_raw_frame: normalizeBoolean(
+      serialParameters.debug_raw_frame,
+      normalized.serial_controller.ros__parameters.debug_raw_frame,
+    ),
   };
 
   normalized.config = {
@@ -456,9 +461,9 @@ export function serializeProtocol(protocol) {
   lines.push("  ros__parameters:");
   for (const [key, value] of orderObjectEntries(
     normalized.serial_controller.ros__parameters,
-    ["port", "baudrate", "timeout"],
+    ["port", "baudrate", "timeout", "debug_raw_frame"],
   )) {
-    const renderedValue = typeof value === "number" ? value : yamlSingleQuote(value);
+    const renderedValue = typeof value === "number" || typeof value === "boolean" ? value : yamlSingleQuote(value);
     lines.push(`    ${key}: ${renderedValue}`);
   }
   lines.push("");
@@ -699,6 +704,12 @@ function initApp() {
         type: "number",
         step: "0.01",
         value: rosParameters.timeout,
+      },
+      {
+        label: "输出原始数据帧",
+        path: "serial_controller.ros__parameters.debug_raw_frame",
+        type: "checkbox",
+        value: rosParameters.debug_raw_frame,
       },
     ];
 

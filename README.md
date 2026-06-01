@@ -77,6 +77,7 @@ serial_controller:
     port: "/dev/stm32"
     baudrate: 115200
     timeout: 0.1
+    debug_raw_frame: false
 
 # 全局配置
 config:
