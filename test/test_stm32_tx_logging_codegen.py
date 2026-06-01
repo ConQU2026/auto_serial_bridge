@@ -1,0 +1,61 @@
+import subprocess
+import tempfile
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CODEGEN_SCRIPT = REPO_ROOT / "scripts" / "codegen.py"
+CONFIG = REPO_ROOT / "config" / "protocol.yaml"
+
+
+def test_generated_bindings_include_decoded_stm32_tx_logging():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = subprocess.run(
+            ["python3", str(CODEGEN_SCRIPT), str(CONFIG), tmpdir],
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+        bindings = Path(tmpdir, "include/auto_serial_bridge/generated_bindings.hpp").read_text()
+
+    assert "STM32 TX DECODED" in bindings
+    assert "describe_packet" in bindings
+    assert "case PACKET_ID_CMDVEL" in bindings
+    assert "CmdVel:" in bindings
+
+
+def test_serial_controller_sources_include_raw_stm32_tx_logging():
+    header = (REPO_ROOT / "include/auto_serial_bridge/serial_controller.hpp").read_text()
+    source = (REPO_ROOT / "src/serial_controller.cpp").read_text()
+
+    assert "log_stm32_tx" in header
+    assert "STM32 TX RAW" in source
+    assert "describe_packet" in source
+
+
+def test_generated_default_port_comes_from_protocol_yaml():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = subprocess.run(
+            ["python3", str(CODEGEN_SCRIPT), str(CONFIG), tmpdir],
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+        generated_config = Path(tmpdir, "include/auto_serial_bridge/generated_config.hpp").read_text()
+
+    controller_source = (REPO_ROOT / "src/serial_controller.cpp").read_text()
+    assert 'DEFAULT_PORT = "/dev/stm32"' in generated_config
+    assert 'declare_parameter<std::string>("port", auto_serial_bridge::config::DEFAULT_PORT)' in controller_source
+
+
+def test_receive_callback_posts_to_serial_strand_without_strand_wrap():
+    source = (REPO_ROOT / "src/serial_controller.cpp").read_text()
+
+    start = source.index("void SerialController::start_receive()")
+    end = source.index("size_t SerialController::ingest_received_bytes", start)
+    start_receive = source[start:end]
+
+    assert "port->async_receive(" in start_receive
+    assert "post_serial" in start_receive
+    assert "serial_strand_->wrap" not in start_receive

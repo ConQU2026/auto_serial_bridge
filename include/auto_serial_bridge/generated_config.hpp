@@ -7,6 +7,7 @@
 namespace auto_serial_bridge {
 namespace config {
 
+    constexpr const char * DEFAULT_PORT = "/dev/stm32";
     constexpr uint32_t DEFAULT_BAUDRATE = 115200;
     constexpr size_t BUFFER_SIZE = 1024;
     constexpr uint8_t CFG_FRAME_HEADER1 = 90;
@@ -31,8 +32,8 @@ namespace config {
             case PACKET_ID_HEARTBEAT: return sizeof(Packet_Heartbeat);
             case PACKET_ID_HANDSHAKE: return sizeof(Packet_Handshake);
             case PACKET_ID_CMDVEL: return sizeof(Packet_CmdVel);
-            case PACKET_ID_GRIPPERCONTROLGOAL: return sizeof(Packet_GripperControlGoal) + 1;
-            case PACKET_ID_WEAPONDOCKGOAL: return sizeof(Packet_WeaponDockGoal) + 1;
+            case PACKET_ID_WEAPONDOCKFINEYVELOCITY: return sizeof(Packet_WeaponDockFineYVelocity) + 1;
+            case PACKET_ID_WEAPONDOCKERROR: return sizeof(Packet_WeaponDockError) + 1;
             case PACKET_ID_MLCONTROLTX: return sizeof(Packet_MlControlTx) + 1;
             case PACKET_ID_MERLINPICKGOAL: return sizeof(Packet_MerlinPickGoal) + 1;
             case PACKET_ID_GRIDPLACEGOAL: return sizeof(Packet_GridPlaceGoal) + 1;
@@ -49,8 +50,8 @@ namespace config {
             case PACKET_ID_HEARTBEAT: return false;
             case PACKET_ID_HANDSHAKE: return false;
             case PACKET_ID_CMDVEL: return false;
-            case PACKET_ID_GRIPPERCONTROLGOAL: return true;
-            case PACKET_ID_WEAPONDOCKGOAL: return true;
+            case PACKET_ID_WEAPONDOCKFINEYVELOCITY: return true;
+            case PACKET_ID_WEAPONDOCKERROR: return true;
             case PACKET_ID_MLCONTROLTX: return true;
             case PACKET_ID_MERLINPICKGOAL: return true;
             case PACKET_ID_GRIDPLACEGOAL: return true;
@@ -67,8 +68,8 @@ namespace config {
             case PACKET_ID_HEARTBEAT: return false;
             case PACKET_ID_HANDSHAKE: return true;
             case PACKET_ID_CMDVEL: return false;
-            case PACKET_ID_GRIPPERCONTROLGOAL: return true;
-            case PACKET_ID_WEAPONDOCKGOAL: return true;
+            case PACKET_ID_WEAPONDOCKFINEYVELOCITY: return true;
+            case PACKET_ID_WEAPONDOCKERROR: return true;
             case PACKET_ID_MLCONTROLTX: return true;
             case PACKET_ID_MERLINPICKGOAL: return true;
             case PACKET_ID_GRIDPLACEGOAL: return true;

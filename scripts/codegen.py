@@ -610,6 +610,8 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
         f.write("#include <cstdint>\n")
         f.write("#include <cstring>\n")
         f.write("#include <functional>\n")
+        f.write("#include <sstream>\n")
+        f.write("#include <string>\n")
         f.write("#include \"auto_serial_bridge/serial_controller.hpp\"\n")
         for inc in includes:
              parts = inc.split('/')
@@ -628,6 +630,52 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
         f.write("template <typename T> void register_subscriber(SerialController* node, const std::string& topic, PacketID id);\n")
         f.write("\n")
         
+        f.write("// STM32 TX DECODED helper.\n")
+        f.write("inline std::string describe_packet(PacketID id, const std::vector<uint8_t>& payload) {\n")
+        f.write("    std::ostringstream out;\n")
+        f.write("    switch(id) {\n")
+        for msg in messages:
+            if msg['direction'] == 'tx' or msg['direction'] == 'both':
+                f.write(f"        case PACKET_ID_{msg['name'].upper()}: {{\n")
+                f.write(f"            if (payload.size() < sizeof(Packet_{msg['name']})) {{\n")
+                f.write(f"                out << \"{msg['name']}: payload_size=\" << payload.size() << \" expected>=\" << sizeof(Packet_{msg['name']});\n")
+                f.write("                return out.str();\n")
+                f.write("            }\n")
+                f.write(f"            const Packet_{msg['name']}* pkt = reinterpret_cast<const Packet_{msg['name']}*>(payload.data());\n")
+                field_parts = []
+                for field in msg['fields']:
+                    field_name = field['proto']
+                    field_type = str(field.get('type', '')).lower()
+                    if field_type.startswith('f'):
+                        field_parts.append(f' << "{field_name}=" << static_cast<double>(pkt->{field_name})')
+                    elif field_type.startswith('u'):
+                        field_parts.append(f' << "{field_name}=" << static_cast<unsigned int>(pkt->{field_name})')
+                    elif field_type.startswith('i'):
+                        field_parts.append(f' << "{field_name}=" << static_cast<int>(pkt->{field_name})')
+                    else:
+                        field_parts.append(f' << "{field_name}=" << static_cast<int>(pkt->{field_name})')
+                if field_parts:
+                    expr = f'out << "{msg["name"]}: "' + ' << ", "'.join([''] * 0)
+                    joined = ''
+                    for i, part in enumerate(field_parts):
+                        if i > 0:
+                            joined += ' << ", "'
+                        joined += part
+                    f.write(f"            out << \"{msg['name']}: \"{joined};\n")
+                else:
+                    f.write(f"            out << \"{msg['name']}\";\n")
+                if msg.get('reliable', False):
+                    f.write(f"            if (payload.size() > sizeof(Packet_{msg['name']})) {{\n")
+                    f.write(f"                out << \", ack_seq=\" << static_cast<unsigned int>(payload[sizeof(Packet_{msg['name']})]);\n")
+                    f.write("            }\n")
+                f.write("            return out.str();\n")
+                f.write("        }\n")
+        f.write("        default:\n")
+        f.write("            out << \"packet_id=0x\" << std::hex << static_cast<unsigned int>(static_cast<uint8_t>(id)) << std::dec << \", payload_size=\" << payload.size();\n")
+        f.write("            return out.str();\n")
+        f.write("    }\n")
+        f.write("}\n\n")
+
         f.write("inline void register_all(SerialController* node) {\n")
         
         for msg in messages:
@@ -832,7 +880,7 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
         f.write("}\n") # namespace
         f.write("}\n") # namespace
 
-def generate_cpp_config(config, messages, type_mappings, output_path):
+def generate_cpp_config(config, messages, type_mappings, output_path, serial_params=None):
     """生成C++公共配置头文件。"""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -845,6 +893,8 @@ def generate_cpp_config(config, messages, type_mappings, output_path):
     strict_heartbeat = config.get('strict_heartbeat', True)
     reliable_retry_interval_ms = config.get('reliable_retry_interval_ms', 100)
     reliable_max_retries = config.get('reliable_max_retries', 3)
+    serial_params = serial_params or {}
+    default_port = serial_params.get('port', '/dev/ttyUSB0')
 
     with open(output_path, 'w') as f:
         f.write("#pragma once\n")
@@ -854,6 +904,7 @@ def generate_cpp_config(config, messages, type_mappings, output_path):
         f.write("namespace auto_serial_bridge {\n")
         f.write("namespace config {\n\n")
 
+        f.write(f"    constexpr const char * DEFAULT_PORT = \"{default_port}\";\n")
         f.write(f"    constexpr uint32_t DEFAULT_BAUDRATE = {config['baudrate']};\n")
         f.write(f"    constexpr size_t BUFFER_SIZE = {config['buffer_size']};\n")
         f.write(f"    constexpr uint8_t CFG_FRAME_HEADER1 = {config['head_byte_1']};\n")
@@ -1200,7 +1251,8 @@ def main():
                         mcu_source_path, source_user_blocks, generated_at)
                         
     generate_cpp_config(config_data['config'], config_data['messages'], config_data['type_mappings'],
-                        os.path.join(output_dir, 'include', 'auto_serial_bridge', 'generated_config.hpp'))
+                        os.path.join(output_dir, 'include', 'auto_serial_bridge', 'generated_config.hpp'),
+                        config_data.get('serial_controller', {}).get('ros__parameters', {}))
                         
     generate_ros_bindings(config_data['messages'], config_data['type_mappings'],
                           config_data['config'],
