@@ -243,7 +243,7 @@ def test_protocol_sample_yaml_messages_include_debug_log_mode_setting():
     assert system_messages.issubset(messages), "protocol-sample.yaml should include fixed system messages"
 
     for name in system_messages:
-        assert messages[name]["debug_log_mode"] in {"on_change", "off"}
+        assert messages[name]["debug_log_mode"] in {"on", "off"}
 
 
 def test_web_editor_exposes_fixed_system_message_examples():

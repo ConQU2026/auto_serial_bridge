@@ -523,7 +523,7 @@ def test_message_debug_log_mode_off_suppresses_generated_rx_tx_debug(tmpdir):
     assert 'RCLCPP_DEBUG(logger, "RX ' not in content
 
 
-def test_message_debug_log_mode_on_change_generates_tx_change_gate(tmpdir):
+def test_message_debug_log_mode_on_generates_tx_debug_without_change_gate(tmpdir):
     cfg = _load_sample_config()
     for msg in cfg['messages']:
         msg['debug_log_mode'] = 'off'
@@ -533,7 +533,7 @@ def test_message_debug_log_mode_on_change_generates_tx_change_gate(tmpdir):
         None,
     )
     assert target_msg is not None, 'sample config should include at least one tx/both message'
-    target_msg['debug_log_mode'] = 'on_change'
+    target_msg['debug_log_mode'] = 'on'
 
     result = _run_codegen(cfg, tmpdir)
     assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
@@ -541,18 +541,15 @@ def test_message_debug_log_mode_on_change_generates_tx_change_gate(tmpdir):
     content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
     message_name = target_msg['name']
     upper_name = message_name.upper()
-    assert f'static bool has_previous_pkt_{message_name} = false;' in content
-    assert f'static Packet_{message_name} previous_pkt_{message_name}{{}};' in content
-    assert (
-        f'const bool should_log_{message_name} = !has_previous_pkt_{message_name} || '
-        f'std::memcmp(&previous_pkt_{message_name}, &pkt, sizeof(Packet_{message_name})) != 0;'
-    ) in content
-    assert f'if (should_log_{message_name}) {{' in content
     assert f'RCLCPP_DEBUG(node->get_logger(), "TX {message_name}:' in content
     assert f'PACKET_ID_{upper_name}' in content
+    assert 'has_previous_pkt_' not in content
+    assert 'previous_pkt_' not in content
+    assert 'should_log_' not in content
+    assert 'std::memcmp' not in content
 
 
-def test_message_debug_log_mode_on_change_generates_rx_change_gate(tmpdir):
+def test_message_debug_log_mode_on_generates_rx_debug_without_change_gate(tmpdir):
     cfg = _load_sample_config()
     for msg in cfg['messages']:
         msg['debug_log_mode'] = 'off'
@@ -562,22 +559,21 @@ def test_message_debug_log_mode_on_change_generates_rx_change_gate(tmpdir):
         None,
     )
     assert target_msg is not None, 'sample config should include at least one rx/both message'
-    target_msg['debug_log_mode'] = 'on_change'
+    target_msg['debug_log_mode'] = 'on'
 
     result = _run_codegen(cfg, tmpdir)
     assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
 
     content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
     message_name = target_msg['name']
-    assert (
-        f'const bool should_log_{message_name} = !has_previous_pkt_{message_name} || '
-        f'std::memcmp(&previous_pkt_{message_name}, pkt, sizeof(Packet_{message_name})) != 0;'
-    ) in content
-    assert f'previous_pkt_{message_name} = *pkt;' in content
     assert f'RCLCPP_DEBUG(logger, "RX {message_name}:' in content
+    assert 'has_previous_pkt_' not in content
+    assert 'previous_pkt_' not in content
+    assert 'should_log_' not in content
+    assert 'std::memcmp' not in content
 
 
-def test_message_debug_log_mode_missing_defaults_to_on_change(tmpdir):
+def test_message_debug_log_mode_missing_defaults_to_on(tmpdir):
     cfg = _load_sample_config()
     cfg['messages'][0].pop('debug_log_mode', None)
 
@@ -585,12 +581,13 @@ def test_message_debug_log_mode_missing_defaults_to_on_change(tmpdir):
     assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
 
     content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
-    assert 'std::memcmp(&previous_pkt_Ack, &pkt, sizeof(Packet_Ack)) != 0' in content
+    assert 'RCLCPP_DEBUG(node->get_logger(), "TX Ack:' in content
+    assert 'std::memcmp(&previous_pkt_Ack, &pkt, sizeof(Packet_Ack)) != 0' not in content
 
 
 def test_message_debug_log_mode_invalid_value_fails_codegen(tmpdir):
     cfg = _load_sample_config()
-    cfg['messages'][0]['debug_log_mode'] = 'always'
+    cfg['messages'][0]['debug_log_mode'] = 'on_change'
 
     result = _run_codegen(cfg, tmpdir)
     assert result.returncode != 0

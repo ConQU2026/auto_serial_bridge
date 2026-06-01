@@ -1,6 +1,6 @@
 const CHECKSUM_OPTIONS = ["NONE", "SUM8", "XOR8", "CRC8"];
 const DIRECTION_OPTIONS = ["tx", "rx", "both"];
-const DEBUG_LOG_MODE_OPTIONS = ["on_change", "off"];
+const DEBUG_LOG_MODE_OPTIONS = ["on", "off"];
 const CONFIG_NUMERIC_KEYS = [
   "baudrate",
   "buffer_size",
@@ -51,7 +51,7 @@ const SYSTEM_MESSAGES = Object.freeze([
     name: "Ack",
     id: 0xfd,
     direction: "both",
-    debug_log_mode: "on_change",
+    debug_log_mode: "on",
     sub_topic: "/task/ack",
     pub_topic: "/task/ack",
     ros_msg: "std_msgs/msg/Int32MultiArray",
@@ -66,7 +66,7 @@ const SYSTEM_MESSAGES = Object.freeze([
     name: "Heartbeat",
     id: 0xfe,
     direction: "both",
-    debug_log_mode: "on_change",
+    debug_log_mode: "on",
     sub_topic: "/task/heartbeat",
     pub_topic: "/task/heartbeat",
     ros_msg: "std_msgs/msg/UInt32",
@@ -78,7 +78,7 @@ const SYSTEM_MESSAGES = Object.freeze([
     name: "Handshake",
     id: 0xff,
     direction: "both",
-    debug_log_mode: "on_change",
+    debug_log_mode: "on",
     sub_topic: "/task/handshake",
     pub_topic: "/task/handshake",
     ros_msg: "std_msgs/msg/UInt32",
@@ -191,7 +191,7 @@ export function createDefaultMessage(existingMessages = []) {
     name: `NewMessage${messageIndex}`,
     id: nextId,
     direction: "tx",
-    debug_log_mode: "on_change",
+    debug_log_mode: "on",
     reliable: false,
     sub_topic: `/task/new_message_${messageIndex}`,
     pub_topic: `/task/new_message_${messageIndex}`,
@@ -211,13 +211,13 @@ function normalizeField(field) {
 
 function normalizeMessage(message, index) {
   const direction = normalizeString(message?.direction || "tx").toLowerCase();
-  const debugLogMode = normalizeString(message?.debug_log_mode || "on_change").toLowerCase();
+  const debugLogMode = normalizeString(message?.debug_log_mode || "on").toLowerCase();
   const fields = Array.isArray(message?.fields) ? message.fields.map(normalizeField) : [];
   return {
     name: normalizeString(message?.name || `Message${index + 1}`),
     id: toInteger(message?.id, index),
     direction: DIRECTION_OPTIONS.includes(direction) ? direction : direction || "tx",
-    debug_log_mode: DEBUG_LOG_MODE_OPTIONS.includes(debugLogMode) ? debugLogMode : "on_change",
+    debug_log_mode: DEBUG_LOG_MODE_OPTIONS.includes(debugLogMode) ? debugLogMode : "on",
     reliable: normalizeBoolean(message?.reliable, false),
     sub_topic: normalizeString(message?.sub_topic),
     pub_topic: normalizeString(message?.pub_topic),

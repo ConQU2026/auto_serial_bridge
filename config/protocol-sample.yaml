@@ -38,7 +38,7 @@ messages:
   - name: "Ack"
     id: 0xFD
     direction: "both"
-    debug_log_mode: "on_change"
+    debug_log_mode: "on"
     sub_topic: "/task/ack"
     pub_topic: "/task/ack"
     ros_msg: "std_msgs/msg/Int32MultiArray"
@@ -50,7 +50,7 @@ messages:
   - name: "Heartbeat"
     id: 0xFE
     direction: "both"
-    debug_log_mode: "on_change"
+    debug_log_mode: "on"
     sub_topic: "/task/heartbeat"
     pub_topic: "/task/heartbeat"
     ros_msg: "std_msgs/msg/UInt32"
@@ -61,7 +61,7 @@ messages:
   - name: "Handshake"
     id: 0xFF
     direction: "both"
-    debug_log_mode: "on_change"
+    debug_log_mode: "on"
     sub_topic: "/task/handshake"
     pub_topic: "/task/handshake"
     ros_msg: "std_msgs/msg/UInt32"
@@ -76,7 +76,7 @@ messages:
   - name: "CmdVel"
     id: 0x01
     direction: "tx"
-    debug_log_mode: "on_change"
+    debug_log_mode: "off"
     sub_topic: "/cmd_vel"
     ros_msg: "geometry_msgs/msg/Twist"
     fields:
@@ -87,7 +87,7 @@ messages:
   - name: "DemoReliableCommand"
     id: 0x02
     direction: "tx"
-    debug_log_mode: "on_change"
+    debug_log_mode: "on"
     reliable: true
     sub_topic: "/demo/reliable_command"
     ros_msg: "std_msgs/msg/UInt32"

@@ -593,17 +593,8 @@ def _write_u8_range_guard(f, msg_name: str, topic: str, field_name: str, read_ex
 
 def _normalize_debug_log_mode(value) -> str:
     if value is None:
-        return "on_change"
+        return "on"
     return str(value).strip().lower()
-
-
-def _identifier_fragment(name: str) -> str:
-    fragment = re.sub(r'[^0-9A-Za-z_]', '_', str(name))
-    if not fragment:
-        return "msg"
-    if fragment[0].isdigit():
-        return f"msg_{fragment}"
-    return fragment
 
 
 def generate_ros_bindings(messages, type_mappings, config, output_path):
@@ -627,7 +618,6 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
     with open(output_path, 'w') as f:
         f.write("#pragma once\n")
         f.write("#include <cstdint>\n")
-        f.write("#include <cstring>\n")
         f.write("#include <functional>\n")
         f.write("#include <sstream>\n")
         f.write("#include <string>\n")
@@ -747,7 +737,7 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
                 
                 send_api = "reliable_send" if msg.get('reliable', False) else "send_packet"
                 f.write(f"            node->{send_api}(PACKET_ID_{msg['name'].upper()}, pkt);\n")
-                debug_log_mode = msg.get('debug_log_mode', 'on_change')
+                debug_log_mode = msg.get('debug_log_mode', 'on')
                 fmt_parts = []
                 arg_parts = []
                 for field in msg['fields']:
@@ -766,27 +756,17 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
                         fmt_parts.append(f"{field_name}=%d")
                         arg_parts.append(f"static_cast<int>(pkt.{field_name})")
 
-                if debug_log_mode == 'on_change':
-                    log_ident = _identifier_fragment(msg['name'])
-                    f.write(f"            static bool has_previous_pkt_{log_ident} = false;\n")
-                    f.write(f"            static Packet_{msg['name']} previous_pkt_{log_ident}{{}};\n")
-                    f.write(
-                        f"            const bool should_log_{log_ident} = !has_previous_pkt_{log_ident} || std::memcmp(&previous_pkt_{log_ident}, &pkt, sizeof(Packet_{msg['name']})) != 0;\n"
-                    )
-                    f.write(f"            if (should_log_{log_ident}) {{\n")
-                    f.write(f"                previous_pkt_{log_ident} = pkt;\n")
-                    f.write(f"                has_previous_pkt_{log_ident} = true;\n")
+                if debug_log_mode == 'on':
                     if fmt_parts:
                         fmt_str = ", ".join(fmt_parts)
                         args_str = ", ".join(arg_parts)
                         f.write(
-                            f"                RCLCPP_DEBUG(node->get_logger(), \"TX {msg['name']}: {fmt_str}\", {args_str});\n"
+                            f"            RCLCPP_DEBUG(node->get_logger(), \"TX {msg['name']}: {fmt_str}\", {args_str});\n"
                         )
                     else:
                         f.write(
-                            f"                RCLCPP_DEBUG(node->get_logger(), \"TX {msg['name']}\");\n"
+                            f"            RCLCPP_DEBUG(node->get_logger(), \"TX {msg['name']}\");\n"
                         )
-                    f.write("            }\n")
                 f.write(f"        }}));\n")
                 f.write("\n")
 
@@ -847,7 +827,7 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
                      else:
                          f.write(f"            {write_expr} = pkt->{field['proto']};\n")
 
-                debug_log_mode = msg.get('debug_log_mode', 'on_change')
+                debug_log_mode = msg.get('debug_log_mode', 'on')
                 fmt_parts = []
                 arg_parts = []
                 for field in msg['fields']:
@@ -866,27 +846,17 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
                         fmt_parts.append(f"{field_name}=%d")
                         arg_parts.append(f"static_cast<int>(pkt->{field_name})")
 
-                if debug_log_mode == 'on_change':
-                    log_ident = _identifier_fragment(msg['name'])
-                    f.write(f"            static bool has_previous_pkt_{log_ident} = false;\n")
-                    f.write(f"            static Packet_{msg['name']} previous_pkt_{log_ident}{{}};\n")
-                    f.write(
-                        f"            const bool should_log_{log_ident} = !has_previous_pkt_{log_ident} || std::memcmp(&previous_pkt_{log_ident}, pkt, sizeof(Packet_{msg['name']})) != 0;\n"
-                    )
-                    f.write(f"            if (should_log_{log_ident}) {{\n")
-                    f.write(f"                previous_pkt_{log_ident} = *pkt;\n")
-                    f.write(f"                has_previous_pkt_{log_ident} = true;\n")
+                if debug_log_mode == 'on':
                     if fmt_parts:
                         fmt_str = ", ".join(fmt_parts)
                         args_str = ", ".join(arg_parts)
                         f.write(
-                            f"                RCLCPP_DEBUG(logger, \"RX {msg['name']}: {fmt_str}\", {args_str});\n"
+                            f"            RCLCPP_DEBUG(logger, \"RX {msg['name']}: {fmt_str}\", {args_str});\n"
                         )
                     else:
                         f.write(
-                            f"                RCLCPP_DEBUG(logger, \"RX {msg['name']}\");\n"
+                            f"            RCLCPP_DEBUG(logger, \"RX {msg['name']}\");\n"
                         )
-                    f.write("            }\n")
                 
                 f.write(f"            if (pubs.pub_{msg['name']}) {{\n")
                 f.write(f"                pubs.pub_{msg['name']}->publish(msg);\n")
@@ -971,7 +941,7 @@ def generate_cpp_config(config, messages, type_mappings, output_path, serial_par
         f.write("    inline constexpr bool is_debug_log_enabled(PacketID id) {\n")
         f.write("        switch (id) {\n")
         for msg in messages:
-            mode = msg.get('debug_log_mode', 'on_change')
+            mode = msg.get('debug_log_mode', 'on')
             enabled = 'false' if mode == 'off' else 'true'
             f.write(f"            case PACKET_ID_{msg['name'].upper()}: return {enabled};\n")
         f.write("            default: return true;\n")
@@ -1181,7 +1151,7 @@ def validate_protocol(config_data):
         errors.append("config.reliable_max_retries must be a positive integer.")
 
     VALID_DIRECTIONS = {"tx", "rx", "both"}
-    VALID_DEBUG_LOG_MODES = {"on_change", "off"}
+    VALID_DEBUG_LOG_MODES = {"on", "off"}
     seen_ids = {}
     seen_names = set()
 
@@ -1195,7 +1165,7 @@ def validate_protocol(config_data):
         if msg.get('direction') not in VALID_DIRECTIONS:
             errors.append(f"Message '{label}' has invalid direction '{msg.get('direction')}'. Must be one of: {', '.join(sorted(VALID_DIRECTIONS))}")
 
-        debug_log_mode = _normalize_debug_log_mode(msg.get('debug_log_mode', 'on_change'))
+        debug_log_mode = _normalize_debug_log_mode(msg.get('debug_log_mode', 'on'))
         if debug_log_mode not in VALID_DEBUG_LOG_MODES:
             errors.append(
                 f"Message '{label}' has invalid debug_log_mode '{msg.get('debug_log_mode')}'. Must be one of: {', '.join(sorted(VALID_DEBUG_LOG_MODES))}."
