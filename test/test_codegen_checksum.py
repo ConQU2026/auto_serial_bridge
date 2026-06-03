@@ -628,7 +628,7 @@ def test_protocol_hash_ignores_whitespace_comments_and_mapping_order(tmpdir):
     yaml_a = """
 serial_controller:
   ros__parameters:
-    port: "/dev/stm32"
+    port: "/dev/ttyACM0"
     baudrate: 115200
     timeout: 0.1
 config:
@@ -687,7 +687,7 @@ serial_controller:
   ros__parameters:
     timeout: 0.1
     baudrate: 115200
-    port: "/dev/stm32"
+    port: "/dev/ttyACM0"
     debug_raw_frame: true
 """
 
@@ -710,7 +710,7 @@ serial_controller:
 def test_protocol_hash_changes_when_message_order_changes(tmpdir):
     yaml_a = """
 serial_controller:
-  ros__parameters: {port: "/dev/stm32", baudrate: 115200, timeout: 0.1}
+  ros__parameters: {port: "/dev/ttyACM0", baudrate: 115200, timeout: 0.1}
 config:
   baudrate: 115200
   buffer_size: 256
@@ -742,7 +742,7 @@ messages:
 """
     yaml_b = """
 serial_controller:
-  ros__parameters: {port: "/dev/stm32", baudrate: 115200, timeout: 0.1}
+  ros__parameters: {port: "/dev/ttyACM0", baudrate: 115200, timeout: 0.1}
 config:
   baudrate: 115200
   buffer_size: 256

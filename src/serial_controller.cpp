@@ -585,26 +585,26 @@ namespace auto_serial_bridge
   }
 
 
-  bool SerialController::should_log_stm32_tx_raw(PacketID id) const
+  bool SerialController::should_log_mcu_tx_raw(PacketID id) const
   {
     const bool debug_log_enabled = config::is_debug_log_enabled(id);
     return detail::should_log_raw_tx_frame(debug_raw_frame_, debug_log_enabled);
   }
 
-  void SerialController::log_stm32_tx(const std::vector<uint8_t> &packet_bytes) const
+  void SerialController::log_mcu_tx(const std::vector<uint8_t> &packet_bytes) const
   {
     const PacketID id = packet_bytes.size() > 2
                             ? static_cast<PacketID>(packet_bytes[2])
                             : static_cast<PacketID>(0);
     const bool debug_log_enabled = config::is_debug_log_enabled(id);
-    const bool log_raw_frame = should_log_stm32_tx_raw(id);
+    const bool log_raw_frame = should_log_mcu_tx_raw(id);
     if (packet_bytes.size() < 5)
     {
       if (log_raw_frame)
       {
         RCLCPP_DEBUG(
             this->get_logger(),
-            "[STM32 TX RAW] %s",
+            "[MCU TX RAW] %s",
             detail::format_hex_payload(packet_bytes.data(), packet_bytes.size(), packet_bytes.size()).c_str());
       }
       return;
@@ -619,7 +619,7 @@ namespace auto_serial_bridge
     {
       RCLCPP_DEBUG(
           this->get_logger(),
-          "[STM32 TX RAW] %s",
+          "[MCU TX RAW] %s",
           detail::format_hex_payload(packet_bytes.data(), packet_bytes.size(), packet_bytes.size()).c_str());
     }
 
@@ -627,7 +627,7 @@ namespace auto_serial_bridge
     {
       RCLCPP_DEBUG(
           this->get_logger(),
-          "[STM32 TX DECODED] packet_id=0x%02X, payload_len=%u, frame_size=%zu, expected_size=%zu",
+          "[MCU TX DECODED] packet_id=0x%02X, payload_len=%u, frame_size=%zu, expected_size=%zu",
           static_cast<unsigned int>(static_cast<uint8_t>(id)),
           static_cast<unsigned int>(payload_len),
           packet_bytes.size(),
@@ -643,7 +643,7 @@ namespace auto_serial_bridge
     std::vector<uint8_t> payload(packet_bytes.begin() + payload_offset, packet_bytes.begin() + payload_offset + payload_len);
     RCLCPP_DEBUG(
         this->get_logger(),
-        "[STM32 TX DECODED] id=0x%02X, len=%u, checksum=0x%02X, %s",
+        "[MCU TX DECODED] id=0x%02X, len=%u, checksum=0x%02X, %s",
         static_cast<unsigned int>(static_cast<uint8_t>(id)),
         static_cast<unsigned int>(payload_len),
         static_cast<unsigned int>(packet_bytes.back()),
@@ -682,7 +682,7 @@ namespace auto_serial_bridge
 
     try
     {
-      log_stm32_tx(packet_bytes);
+      log_mcu_tx(packet_bytes);
       port->async_send(packet_bytes);
     }
     catch (const std::exception &e)

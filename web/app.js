@@ -15,7 +15,7 @@ const ROS_NUMERIC_KEYS = ["baudrate", "timeout"];
 const DEFAULT_PROTOCOL = Object.freeze({
   serial_controller: {
     ros__parameters: {
-      port: "/dev/stm32",
+      port: "/dev/ttyACM0",
       baudrate: 115200,
       timeout: 0.1,
       debug_raw_frame: false,

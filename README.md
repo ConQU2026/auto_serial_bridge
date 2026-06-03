@@ -74,7 +74,7 @@ cp config/protocol-sample.yaml config/protocol.yaml
 # ROS2 参数配置
 serial_controller:
   ros__parameters:
-    port: "/dev/stm32"
+    port: "/dev/ttyACM0"
     baudrate: 115200
     timeout: 0.1
     debug_raw_frame: false

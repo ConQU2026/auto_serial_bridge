@@ -34,7 +34,6 @@ namespace config {
             case PACKET_ID_CMDVEL: return sizeof(Packet_CmdVel);
             case PACKET_ID_WEAPONDOCKFINEYVELOCITY: return sizeof(Packet_WeaponDockFineYVelocity) + 1;
             case PACKET_ID_WEAPONDOCKERROR: return sizeof(Packet_WeaponDockError) + 1;
-            case PACKET_ID_MLCONTROLTX: return sizeof(Packet_MlControlTx) + 1;
             case PACKET_ID_MERLINPICKGOAL: return sizeof(Packet_MerlinPickGoal) + 1;
             case PACKET_ID_GRIDPLACEGOAL: return sizeof(Packet_GridPlaceGoal) + 1;
             case PACKET_ID_GRIDATTACKGOAL: return sizeof(Packet_GridAttackGoal) + 1;
@@ -52,7 +51,6 @@ namespace config {
             case PACKET_ID_CMDVEL: return false;
             case PACKET_ID_WEAPONDOCKFINEYVELOCITY: return true;
             case PACKET_ID_WEAPONDOCKERROR: return true;
-            case PACKET_ID_MLCONTROLTX: return true;
             case PACKET_ID_MERLINPICKGOAL: return true;
             case PACKET_ID_GRIDPLACEGOAL: return true;
             case PACKET_ID_GRIDATTACKGOAL: return true;
@@ -64,13 +62,12 @@ namespace config {
 
     inline constexpr bool is_debug_log_enabled(PacketID id) {
         switch (id) {
-            case PACKET_ID_ACK: return true;
+            case PACKET_ID_ACK: return false;
             case PACKET_ID_HEARTBEAT: return false;
             case PACKET_ID_HANDSHAKE: return true;
             case PACKET_ID_CMDVEL: return false;
             case PACKET_ID_WEAPONDOCKFINEYVELOCITY: return true;
             case PACKET_ID_WEAPONDOCKERROR: return true;
-            case PACKET_ID_MLCONTROLTX: return true;
             case PACKET_ID_MERLINPICKGOAL: return true;
             case PACKET_ID_GRIDPLACEGOAL: return true;
             case PACKET_ID_GRIDATTACKGOAL: return true;

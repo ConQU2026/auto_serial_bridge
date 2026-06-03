@@ -639,7 +639,7 @@ def generate_ros_bindings(messages, type_mappings, config, output_path):
         f.write("template <typename T> void register_subscriber(SerialController* node, const std::string& topic, PacketID id);\n")
         f.write("\n")
         
-        f.write("// STM32 TX DECODED helper.\n")
+        f.write("// MCU TX DECODED helper.\n")
         f.write("inline std::string describe_packet(PacketID id, const std::vector<uint8_t>& payload) {\n")
         f.write("    std::ostringstream out;\n")
         f.write("    switch(id) {\n")
@@ -883,7 +883,7 @@ def generate_cpp_config(config, messages, type_mappings, output_path, serial_par
     reliable_retry_interval_ms = config.get('reliable_retry_interval_ms', 100)
     reliable_max_retries = config.get('reliable_max_retries', 3)
     serial_params = serial_params or {}
-    default_port = serial_params.get('port', '/dev/ttyUSB0')
+    default_port = serial_params.get('port', '/dev/ttyACM0')
 
     with open(output_path, 'w') as f:
         f.write("#pragma once\n")

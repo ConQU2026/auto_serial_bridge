@@ -25,7 +25,7 @@ if [ ! -e "$SOURCE_DEV" ]; then
 fi
 
 # 获取目标别名
-read -p "请输入想要绑定的别名 (不带 /dev/, 例如 stm32): " ALIAS_NAME
+read -p "请输入想要绑定的别名 (不带 /dev/, 例如 mcu): " ALIAS_NAME
 
 if [ -z "$ALIAS_NAME" ]; then
     echo -e "${RED}[错误] 别名不能为空！${NC}"
