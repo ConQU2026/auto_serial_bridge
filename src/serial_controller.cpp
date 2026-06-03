@@ -596,6 +596,7 @@ namespace auto_serial_bridge
     const PacketID id = packet_bytes.size() > 2
                             ? static_cast<PacketID>(packet_bytes[2])
                             : static_cast<PacketID>(0);
+    const bool debug_log_enabled = config::is_debug_log_enabled(id);
     const bool log_raw_frame = should_log_stm32_tx_raw(id);
     if (packet_bytes.size() < 5)
     {
@@ -634,8 +635,13 @@ namespace auto_serial_bridge
       return;
     }
 
+    if (!debug_log_enabled)
+    {
+      return;
+    }
+
     std::vector<uint8_t> payload(packet_bytes.begin() + payload_offset, packet_bytes.begin() + payload_offset + payload_len);
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
         this->get_logger(),
         "[STM32 TX DECODED] id=0x%02X, len=%u, checksum=0x%02X, %s",
         static_cast<unsigned int>(static_cast<uint8_t>(id)),

@@ -35,6 +35,23 @@ def test_serial_controller_sources_include_raw_stm32_tx_logging():
     assert "RCLCPP_DEBUG" in source
 
 
+def test_serial_controller_decoded_stm32_tx_logging_is_debug_only_and_respects_debug_log_mode():
+    source = (REPO_ROOT / "src/serial_controller.cpp").read_text()
+
+    start = source.index("void SerialController::log_stm32_tx")
+    end = source.index("bool SerialController::async_send_impl", start)
+    log_fn = source[start:end]
+
+    assert "const bool debug_log_enabled = config::is_debug_log_enabled(id);" in log_fn
+    assert "if (!debug_log_enabled)" in log_fn
+    assert "[STM32 TX DECODED] id=0x%02X" in log_fn
+
+    decoded_line = log_fn.index("[STM32 TX DECODED] id=0x%02X")
+    before_decoded = log_fn[:decoded_line]
+    assert "RCLCPP_DEBUG" in before_decoded[before_decoded.rfind("RCLCPP_"):]
+    assert "RCLCPP_INFO" not in log_fn
+
+
 def test_generated_default_port_comes_from_protocol_yaml():
     with tempfile.TemporaryDirectory() as tmpdir:
         result = subprocess.run(
