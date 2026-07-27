@@ -1,0 +1,42 @@
+name: ROS 2 Humble CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+    container:
+      image: ros:humble-ros-base
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y python3-colcon-common-extensions python3-pytest python3-yaml \
+            python3-serial socat ros-humble-ament-cmake-gtest ros-humble-ament-cmake-pytest \
+            ros-humble-io-context ros-humble-rclcpp-components
+      - name: Validate protocol generation
+        run: |
+          . /opt/ros/humble/setup.sh
+          python3 scripts/codegen.py --print-ros-packages config/protocol.yaml
+          python3 scripts/codegen.py config/protocol.yaml /tmp/auto_serial_bridge_codegen
+      - name: Reject private names and source generated files
+        run: |
+          python3 scripts/public_source_scan.py
+          test ! -e include/auto_serial_bridge/generated_config.hpp
+          test ! -e include/auto_serial_bridge/generated_bindings.hpp
+          test ! -d mcu_output
+      - name: Build
+        run: |
+          . /opt/ros/humble/setup.sh
+          cd ..
+          colcon build --packages-select auto_serial_bridge --event-handlers console_direct+
+      - name: Test
+        run: |
+          . /opt/ros/humble/setup.sh
+          cd ..
+          . install/setup.sh
+          colcon test --packages-select auto_serial_bridge --event-handlers console_direct+
+          colcon test-result --verbose

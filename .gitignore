@@ -1,0 +1,32 @@
+# Build directories
+build/
+install/
+log/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.agent/
+
+
+# Compiled files
+*.o
+*.so
+*.a
+*.out
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache
+
+# ROS specific
+devel/
+.catkin_workspace
+_codeql_detected_source_root
+
+# Generated files are emitted under the CMake build directory.
