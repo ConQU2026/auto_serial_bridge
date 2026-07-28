@@ -1,5 +1,9 @@
 # auto_serial_bridge
 
+![ROS 2 Humble](https://img.shields.io/badge/ROS%202-Humble-blue)
+![Ubuntu 22.04](https://img.shields.io/badge/Ubuntu-22.04-orange)
+![Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-green)
+
 `auto_serial_bridge` 是面向 ROS 2 Humble 的配置驱动串口桥。仓库自带可运行的中性协议；用户只需修改 `config/protocol.yaml`，重新编译后即可同步生成 ROS 绑定、MCU C 代码和协议文档。
 
 ## 能力与限制
