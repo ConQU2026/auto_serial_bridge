@@ -11,6 +11,8 @@
 
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>asio_cmake_module</depend>
   <depend>io_context</depend>
   <depend>rclcpp_components</depend>
   <depend>asio</depend>

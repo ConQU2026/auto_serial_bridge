@@ -16,7 +16,7 @@ jobs:
           apt-get update
           apt-get install -y python3-colcon-common-extensions python3-pytest python3-yaml \
             python3-serial socat ros-humble-ament-cmake-gtest ros-humble-ament-cmake-pytest \
-            ros-humble-io-context ros-humble-rclcpp-components
+            ros-humble-asio-cmake-module ros-humble-io-context ros-humble-rclcpp-components
       - name: Validate protocol generation
         run: |
           . /opt/ros/humble/setup.sh

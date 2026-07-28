@@ -1,24 +1,29 @@
-# ROS 2 node parameters. Modify this file, then rebuild the package.
+# ROS 2 节点参数。修改此文件后，必须重新编译本包。
+# 必须保留 serial_controller、config、type_mappings 和 messages 这四个部分。
+# 下方标有“必留”的配置会被代码生成器直接使用；删除后会导致协议生成失败
+# 或节点无法正常启动。涉及线协议的值只能在 ROS 与 MCU 两端同步修改。
 serial_controller:
   ros__parameters:
-    port: "/dev/ttyACM0"
-    baudrate: 115200
+    port: "/dev/ttyACM0"       # 必留：串口设备路径；可通过 launch 参数覆盖
+    baudrate: 115200            # 必留：本文件中唯一的波特率配置
     debug_raw_frame: false
 
 config:
-  buffer_size: 1024
-  head_byte_1: 0x5A
-  head_byte_2: 0xA5
-  checksum: "CRC8"
-  require_handshake: true
-  ignore_version_mismatch: false
-  enable_heartbeat: true
-  strict_heartbeat: true
+  buffer_size: 1024             # 必留：必须能够容纳最大完整帧
+  head_byte_1: 0x5A             # 必留：线协议参数，必须与 MCU 保持一致
+  head_byte_2: 0xA5             # 必留：线协议参数，必须与 MCU 保持一致
+  checksum: "CRC8"              # 必留：可选 NONE、SUM8、XOR8 或 CRC8
+  require_handshake: true        # 必留：控制框架握手功能
+  ignore_version_mismatch: false # 必留：为保证协议安全，建议保持 false
+  enable_heartbeat: true         # 必留：控制框架心跳功能
+  strict_heartbeat: true         # 必留：启用后，心跳超时会断开连接
   heartbeat_timeout_ms: 3000
   reliable_retry_interval_ms: 100
   reliable_max_retries: 3
   qos_depth: 10
 
+# 必须保留此类型映射。下方使用的每种字段类型都必须映射为代码生成器支持的
+# 定长 C 类型。可以按需增加别名，但不能删除仍被消息字段使用的别名。
 type_mappings:
   f32: "float"
   i32: "int32_t"
@@ -26,7 +31,12 @@ type_mappings:
   u16: "uint16_t"
   u32: "uint32_t"
 
+# 必须保留 messages 列表。Ack、Heartbeat 和 Handshake 是框架必需的系统消息：
+# 不得删除、重命名、调整字段顺序或修改 ID 与方向；普通消息不得占用系统保留的
+# 0xFD 至 0xFF。其他示例消息可以根据实际协议替换。
 messages:
+
+#===========================================================================
   - name: "Ack"
     id: 0xFD
     direction: "both"
@@ -61,6 +71,7 @@ messages:
     fields:
       - { proto: "protocol_hash", type: "u32", ros: "data" }
 
+#===========================================================================
   - name: "DemoCommand"
     id: 0x01
     direction: "tx"
@@ -91,3 +102,15 @@ messages:
     notes: "Neutral MCU-to-ROS telemetry example."
     fields:
       - { proto: "value", type: "f32", ros: "data" }
+
+  - name: "VelocityCommand"
+    id: 0x04
+    direction: "tx"
+    debug_log_mode: "on"
+    sub_topic: "cmd_vel"
+    ros_msg: "geometry_msgs/msg/Twist"
+    notes: "Generic velocity command example. The bridge only forwards incoming messages and does not provide command keepalive or timeout behavior."
+    fields:
+      - { proto: "linear_x", type: "f32", ros: "linear.x" }
+      - { proto: "linear_y", type: "f32", ros: "linear.y" }
+      - { proto: "angular_z", type: "f32", ros: "angular.z" }
