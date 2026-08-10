@@ -1,0 +1,86 @@
+serial_controller:
+  ros__parameters:
+    port: "/dev/ttyACM0"
+    baudrate: 115200
+    debug_raw_frame: false
+
+config:
+  buffer_size: 1024
+  head_byte_1: 0x5A
+  head_byte_2: 0xA5
+  checksum: "CRC8"
+  require_handshake: true
+  ignore_version_mismatch: false
+  enable_heartbeat: true
+  strict_heartbeat: true
+  heartbeat_timeout_ms: 3000
+  reliable_retry_interval_ms: 100
+  reliable_max_retries: 3
+  qos_depth: 10
+
+type_mappings:
+  f32: "float"
+  i32: "int32_t"
+  u8: "uint8_t"
+  u16: "uint16_t"
+  u32: "uint32_t"
+
+messages:
+  - name: "Ack"
+    id: 0xFD
+    direction: "both"
+    debug_log_mode: "off"
+    sub_topic: "auto_serial_bridge/system/ack"
+    pub_topic: "auto_serial_bridge/system/ack"
+    ros_msg: "std_msgs/msg/Int32MultiArray"
+    fields:
+      - { proto: "acked_id", type: "u8", ros: "data[0]" }
+      - { proto: "ack_seq", type: "u8", ros: "data[1]" }
+
+  - name: "Heartbeat"
+    id: 0xFE
+    direction: "both"
+    debug_log_mode: "off"
+    sub_topic: "auto_serial_bridge/system/heartbeat"
+    pub_topic: "auto_serial_bridge/system/heartbeat"
+    ros_msg: "std_msgs/msg/UInt32"
+    fields:
+      - { proto: "count", type: "u32", ros: "data" }
+
+  - name: "Handshake"
+    id: 0xFF
+    direction: "both"
+    debug_log_mode: "off"
+    sub_topic: "auto_serial_bridge/system/handshake"
+    pub_topic: "auto_serial_bridge/system/handshake"
+    ros_msg: "std_msgs/msg/UInt32"
+    fields:
+      - { proto: "protocol_hash", type: "u32", ros: "data" }
+
+  - name: "FixtureCommand"
+    id: 0x01
+    direction: "tx"
+    debug_log_mode: "on"
+    sub_topic: "fixture/command"
+    ros_msg: "std_msgs/msg/UInt32"
+    fields:
+      - { proto: "value", type: "u32", ros: "data" }
+
+  - name: "FixtureReliableCommand"
+    id: 0x02
+    direction: "tx"
+    reliable: true
+    debug_log_mode: "on"
+    sub_topic: "fixture/reliable_command"
+    ros_msg: "std_msgs/msg/UInt32"
+    fields:
+      - { proto: "value", type: "u32", ros: "data" }
+
+  - name: "FixtureTelemetry"
+    id: 0x03
+    direction: "rx"
+    debug_log_mode: "on"
+    pub_topic: "fixture/telemetry"
+    ros_msg: "std_msgs/msg/Float32"
+    fields:
+      - { proto: "value", type: "f32", ros: "data" }

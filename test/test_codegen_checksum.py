@@ -17,7 +17,7 @@ import yaml
 SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), '..', 'scripts')
 CODEGEN_SCRIPT = os.path.abspath(os.path.join(SCRIPTS_DIR, 'codegen.py'))
 SAMPLE_CONFIG = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), '..', 'config', 'protocol.yaml')
+    os.path.join(os.path.dirname(__file__), 'fixtures', 'protocol_test.yaml')
 )
 
 SUPPORTED_ALGOS = ["NONE", "SUM8", "XOR8", "CRC8"]
@@ -516,6 +516,51 @@ def test_sample_config_heartbeat_is_both(tmpdir):
     assert 'register_loopback_publisher(PACKET_ID_HEARTBEAT' in content
     assert 'Heartbeat (ROS -> MCU)' in content
     assert '### `Heartbeat`' in rx_section
+
+
+def test_fixture_reliable_message_includes_sequence_byte_in_compiled_wire_size(tmpdir):
+    cfg = _load_sample_config()
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
+
+    generated_dir = os.path.join(tmpdir, 'generated')
+    protocol_include_dir = os.path.join(
+        tmpdir, 'include', 'auto_serial_bridge', 'generated'
+    )
+    os.makedirs(protocol_include_dir)
+    shutil.copy(
+        os.path.join(generated_dir, 'protocol.h'),
+        os.path.join(protocol_include_dir, 'protocol.h'),
+    )
+
+    source_path = os.path.join(tmpdir, 'reliable_wire_size.cpp')
+    with open(source_path, 'w') as source:
+        source.write(
+            '#include "generated_config.hpp"\n'
+            'using namespace auto_serial_bridge;\n'
+            'static_assert(config::is_reliable_packet('
+            'PACKET_ID_FIXTURERELIABLECOMMAND));\n'
+            'static_assert(config::expected_payload_size('
+            'PACKET_ID_FIXTURERELIABLECOMMAND) == '
+            'sizeof(Packet_FixtureReliableCommand) + 1);\n'
+            'int main() { return 0; }\n'
+        )
+
+    compile_result = subprocess.run(
+        [
+            'g++', '-std=c++17',
+            '-I', generated_dir,
+            '-I', os.path.join(tmpdir, 'include'),
+            source_path,
+            '-o', os.path.join(tmpdir, 'reliable_wire_size'),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert compile_result.returncode == 0, (
+        f"g++ failed:\n{compile_result.stdout}\n{compile_result.stderr}"
+    )
 
 
 def test_message_debug_log_mode_off_suppresses_generated_rx_tx_debug(tmpdir):

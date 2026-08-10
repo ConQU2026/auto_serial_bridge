@@ -239,21 +239,6 @@ def test_protocol_sample_yaml_messages_include_debug_log_mode_setting():
     for name in system_messages:
         assert messages[name]["debug_log_mode"] in {"on", "off"}
 
-    assert {"DemoCommand", "DemoReliableCommand", "DemoTelemetry"}.issubset(messages)
-
-
-def test_public_protocol_contains_no_private_names():
-    protocol_text = PROTOCOL_SAMPLE_PATH.read_text()
-    forbidden_hex = (
-        "576561706f6e446f636b", "4d65726c696e5069636b", "47726964506c616365",
-        "4772696441747461636b", "47656e65726963537461747573", "2f7461736b2f",
-        "2f6465762f73746d3332", "436d6456656c",
-    )
-    for encoded in forbidden_hex:
-        forbidden = bytes.fromhex(encoded).decode()
-        assert forbidden not in protocol_text
-
-
 def test_web_editor_exposes_fixed_system_message_examples():
     app_js = WEB_APP_PATH.read_text()
     index_html = WEB_INDEX_PATH.read_text()

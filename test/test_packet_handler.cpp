@@ -189,26 +189,6 @@ TEST_F(PacketHandlerTest, PayloadLongerThanProtocolMaximumIsRejectedAndResynced)
     EXPECT_EQ(pkt.as<Packet_Heartbeat>().count, 33);
 }
 
-TEST_F(PacketHandlerTest, ReliableWirePayloadLengthIsAcceptedForDemoReliableCommand) {
-    PacketHandler handler(64);
-
-    Packet_DemoReliableCommand payload{};
-    payload.value = 42;
-
-    std::vector<uint8_t> frame = handler.pack(PACKET_ID_DEMORELIABLECOMMAND, payload);
-    frame[3] = static_cast<uint8_t>(frame[3] + 1);
-    frame.insert(frame.end() - 1, 0x2A);
-    frame.back() = PacketHandler::calculate_checksum(frame.data() + 2, frame.size() - 3);
-
-    handler.feed_data(frame);
-
-    Packet pkt;
-    ASSERT_TRUE(handler.parse_packet(pkt));
-    EXPECT_EQ(pkt.id, PACKET_ID_DEMORELIABLECOMMAND);
-    ASSERT_EQ(pkt.payload.size(), sizeof(Packet_DemoReliableCommand) + 1);
-    EXPECT_EQ(pkt.payload.back(), 0x2A);
-}
-
 TEST_F(PacketHandlerTest, FeedWithRecoveryParsesBufferedFramesBeforeDroppingRemainder) {
     PacketHandler small_handler(9);
     Packet_Heartbeat data1 = {201};

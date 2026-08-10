@@ -4,7 +4,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CODEGEN_SCRIPT = REPO_ROOT / "scripts" / "codegen.py"
-CONFIG = REPO_ROOT / "config" / "protocol.yaml"
+CONFIG = REPO_ROOT / "test" / "fixtures" / "protocol_test.yaml"
 
 
 def test_generated_bindings_include_decoded_mcu_tx_logging():
@@ -20,8 +20,8 @@ def test_generated_bindings_include_decoded_mcu_tx_logging():
 
     assert "MCU TX DECODED" in bindings
     assert "describe_packet" in bindings
-    assert "case PACKET_ID_DEMOCOMMAND" in bindings
-    assert "DemoCommand:" in bindings
+    assert "case PACKET_ID_FIXTURECOMMAND" in bindings
+    assert "FixtureCommand:" in bindings
 
 
 def test_serial_controller_sources_include_raw_mcu_tx_logging():

@@ -5,7 +5,6 @@ import subprocess
 import threading
 import time
 import unittest
-from importlib import import_module
 
 import launch
 import launch_testing.actions
@@ -99,77 +98,6 @@ def get_message_id(name):
             if message["name"] == name:
                 return message["id"]
     return None
-
-
-def get_ros_msg_class(ros_msg_type_str):
-    parts = ros_msg_type_str.split("/")
-    if len(parts) < 3:
-        raise ValueError(f"Invalid ROS message type string: {ros_msg_type_str!r}")
-
-    module_name = f"{parts[0]}.{parts[1]}"
-    class_name = parts[2]
-    try:
-        module = import_module(module_name)
-    except (ImportError, ModuleNotFoundError) as exc:
-        raise ValueError(
-            f"Could not import ROS message module {module_name!r} "
-            f"for type {ros_msg_type_str!r}"
-        ) from exc
-
-    try:
-        return getattr(module, class_name)
-    except AttributeError as exc:
-        raise ValueError(
-            f"ROS message type {ros_msg_type_str!r} "
-            f"not found in module {module_name!r}"
-        ) from exc
-
-
-def get_struct_format_for_type(type_name):
-    formats = {
-        "uint8": "B",
-        "uint8_t": "B",
-        "u8": "B",
-        "uint16": "H",
-        "uint16_t": "H",
-        "u16": "H",
-        "uint32": "I",
-        "uint32_t": "I",
-        "u32": "I",
-        "int8": "b",
-        "int8_t": "b",
-        "i8": "b",
-        "int16": "h",
-        "int16_t": "h",
-        "i16": "h",
-        "int32": "i",
-        "int32_t": "i",
-        "i32": "i",
-        "float": "f",
-        "float32": "f",
-        "f32": "f",
-        "double": "d",
-        "float64": "d",
-        "f64": "d",
-    }
-    if type_name not in formats:
-        raise ValueError(
-            f"Unknown field type '{type_name}' in protocol configuration. "
-            f"Supported types are: {', '.join(sorted(formats.keys()))}"
-        )
-    return formats[type_name]
-
-
-def generate_dummy_payload(msg_config):
-    fmt = "<"
-    values = []
-    fields = msg_config.get("fields", [])
-    if not fields:
-        return b""
-    for field in fields:
-        fmt += get_struct_format_for_type(field["type"])
-        values.append(0)
-    return struct.pack(fmt, *values)
 
 
 HEAD1 = int(get_runtime_protocol_value("head_byte_1", 0x5A, "AUTO_SERIAL_BRIDGE_HEAD1"))
@@ -417,24 +345,6 @@ class SerialControllerPtyTestCase(unittest.TestCase):
 
         return False
 
-    def wait_for_packet_while_servicing_heartbeat(self, expected_packet_id, timeout_sec=2.0):
-        heartbeat_id = get_message_id("Heartbeat")
-        self.assertIsNotNone(heartbeat_id, "Heartbeat message ID not found in protocol config.")
-
-        start_time = time.time()
-        while time.time() - start_time < timeout_sec:
-            packet_id, payload = self.read_next_packet(timeout_sec=0.1)
-            if packet_id is None:
-                continue
-            self._seen_packet_ids.append(packet_id)
-            if packet_id == heartbeat_id:
-                self.assertEqual(len(payload), 4)
-                self.write_serial_packet(self.pack_packet(packet_id, payload))
-                continue
-            if packet_id == expected_packet_id:
-                return True
-        return False
-
     def assert_no_packet_id(self, forbidden_packet_id, timeout_sec):
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
@@ -448,39 +358,3 @@ class SerialControllerPtyTestCase(unittest.TestCase):
                 f"Unexpected packet id {forbidden_packet_id} seen while expecting silence; "
                 f"seen packet ids={self._seen_packet_ids}",
             )
-
-    def publish_message_until_seen(self, tx_msg, timeout_sec=4.0, service_heartbeat=True):
-        self.serial_port.reset_input_buffer()
-        self._rx_buf = b""
-        start_time = time.time()
-        while time.time() - start_time < timeout_sec:
-            publish_result = subprocess.run(
-                [
-                    "bash",
-                    "-lc",
-                    (
-                        f"source {REPO_ROOT}/install/setup.bash && "
-                        f"ros2 topic pub --once {tx_msg['sub_topic']} {tx_msg['ros_msg']} '{{}}'"
-                    ),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            self.assertEqual(
-                publish_result.returncode,
-                0,
-                f"Failed to publish {tx_msg['name']} via ros2 topic pub:\n"
-                f"{publish_result.stdout}\n{publish_result.stderr}",
-            )
-            if service_heartbeat:
-                if self.wait_for_packet_while_servicing_heartbeat(tx_msg["id"], timeout_sec=0.3):
-                    return True
-            else:
-                packet_id, _payload = self.read_next_packet(timeout_sec=0.3)
-                if packet_id == tx_msg["id"]:
-                    return True
-                if packet_id is not None:
-                    self._seen_packet_ids.append(packet_id)
-            time.sleep(0.05)
-        return False

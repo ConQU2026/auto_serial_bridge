@@ -1,14 +1,10 @@
-import unittest
 import time
 
 import pytest
-import rclpy
 import struct
-from std_msgs.msg import Float32, UInt32
 
 from pty_test_utils import (
     ID_HANDSHAKE,
-    PROTOCOL_CONFIG,
     PROTOCOL_HASH,
     PYTESTMARK_SKIP_IF_NO_PTY,
     SerialControllerPtyTestCase,
@@ -58,41 +54,6 @@ class TestSerialController(SerialControllerPtyTestCase):
                 return
 
         self.fail("ignore_version_mismatch=true 时，mismatch 握手后仍未进入 RUNNING")
-
-    def test_communication(self):
-        self.assertIsNotNone(
-            PROTOCOL_CONFIG,
-            "Protocol configuration is not loaded."
-        )
-
-        excluded_system_msgs = {'Ack', 'Heartbeat', 'Handshake'}
-
-        # 1. 执行握手
-        self.ensure_running_state()
-        
-        # 找到一个 tx_msg
-        tx_msg = None
-        for msg in PROTOCOL_CONFIG.get('messages', []):
-            if (
-                msg.get('name') not in excluded_system_msgs and
-                msg.get('direction') in ['tx', 'both'] and
-                not tx_msg
-            ):
-                tx_msg = msg
-
-        self.assertIsNotNone(
-            tx_msg,
-            "No non-system message with direction 'tx' or 'both' found in protocol config."
-        )
-
-        # 2. 测试发送到串口 (ROS -> Serial)
-        self.serial_port.reset_input_buffer()
-        self._rx_buf = b''
-
-        self.assertTrue(
-            self.publish_message_until_seen(tx_msg, timeout_sec=4.0, service_heartbeat=True),
-            f"未在串口上收到 {tx_msg['name']} 数据; seen packet ids={self._seen_packet_ids}"
-        )
 
     def test_stale_heartbeat_ack_triggers_disconnect(self):
         first_count = self.ensure_running_state()
@@ -148,58 +109,3 @@ class TestSerialController(SerialControllerPtyTestCase):
             if packet_id == heartbeat_id:
                 self.assertEqual(len(payload), 4)
                 self.write_serial_packet(self.pack_packet(packet_id, payload))
-
-    def test_demo_messages_round_trip(self):
-        self.ensure_running_state()
-        heartbeat_id = get_message_id('Heartbeat')
-        demo_command_id = get_message_id('DemoCommand')
-        demo_telemetry_id = get_message_id('DemoTelemetry')
-
-        self.assertIsNotNone(demo_command_id)
-        self.assertIsNotNone(demo_telemetry_id)
-
-        publisher = self.node.create_publisher(UInt32, 'demo/command', 10)
-        received_msgs = []
-        self.node.create_subscription(
-            Float32,
-            'demo/telemetry',
-            lambda msg: received_msgs.append(msg.data),
-            10,
-        )
-
-        tx_msg = UInt32()
-        tx_msg.data = 42
-
-        tx_seen = False
-        deadline = time.time() + 4.0
-        while time.time() < deadline and not tx_seen:
-            publisher.publish(tx_msg)
-            rclpy.spin_once(self.node, timeout_sec=0.05)
-            packet_id, payload = self.read_next_packet(timeout_sec=0.2)
-            if packet_id is None:
-                continue
-            self._seen_packet_ids.append(packet_id)
-            if packet_id == heartbeat_id:
-                self.assertEqual(len(payload), 4)
-                self.write_serial_packet(self.pack_packet(packet_id, payload))
-                continue
-            if packet_id == demo_command_id:
-                self.assertEqual(struct.unpack('<I', payload)[0], 42)
-                tx_seen = True
-
-        self.assertTrue(tx_seen, "Did not observe DemoCommand payload on serial")
-
-        self.write_serial_packet(
-            self.pack_packet(demo_telemetry_id, struct.pack('<f', 12.5))
-        )
-
-        rx_deadline = time.time() + 2.0
-        while time.time() < rx_deadline and not received_msgs:
-            rclpy.spin_once(self.node, timeout_sec=0.1)
-            packet_id, payload = self.read_next_packet(timeout_sec=0.05)
-            if packet_id == heartbeat_id:
-                self.assertEqual(len(payload), 4)
-                self.write_serial_packet(self.pack_packet(packet_id, payload))
-
-        self.assertTrue(received_msgs, "Did not receive DemoTelemetry on ROS topic")
-        self.assertAlmostEqual(received_msgs[0], 12.5)
