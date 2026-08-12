@@ -531,7 +531,7 @@
           <div class="panel-header">
             <div>
               <h2>消息编辑器</h2>
-              <div class="hint">仅可编辑自定义消息；系统消息（Ack/Heartbeat/Handshake）固定且只在 YAML 预览/导出中显示。</div>
+              <div class="hint">只需定义业务消息；系统消息（Ack/Heartbeat/Handshake，ID 0xFD-0xFF）由框架内置，无需配置。</div>
             </div>
             <button id="add-message-button" class="button">添加消息</button>
           </div>
@@ -543,7 +543,7 @@
         <div class="panel-header">
           <div>
             <h2>YAML 预览</h2>
-            <div class="hint">固定顺序序列化，保留十六进制格式，不保留原注释。</div>
+            <div class="hint">由 js-yaml 序列化，帧头与消息 ID 以十六进制展示，不保留原注释。</div>
           </div>
         </div>
         <pre id="yaml-preview" class="mono"></pre>
@@ -551,8 +551,15 @@
     </div>
 
     <button id="floating-add-button" class="floating-add" title="添加消息" aria-label="添加消息">+</button>
+    <datalist id="type-options">
+      <option value="u8"></option>
+      <option value="u16"></option>
+      <option value="u32"></option>
+      <option value="i32"></option>
+      <option value="f32"></option>
+    </datalist>
 
     <script src="./vendor/js-yaml.min.js"></script>
-    <script type="module" src="./app.js"></script>
+    <script src="./app.js"></script>
   </body>
 </html>

@@ -45,8 +45,17 @@ def _calculate_checksum(data: bytes, algorithm: str) -> int:
     raise ValueError(f"Unsupported checksum algorithm: {algorithm}")
 
 
+# 系统消息由 codegen 内置注入，不出现在 protocol.yaml 中
+SYSTEM_MESSAGE_IDS = {"Ack": 0xFD, "Heartbeat": 0xFE, "Handshake": 0xFF}
+
+
 def _message_ids(config: dict) -> dict[str, int]:
-    return {message["name"]: int(message["id"]) for message in config["messages"]}
+    ids = {
+        message["name"]: int(message["id"])
+        for message in (config.get("messages") or [])
+    }
+    ids.update(SYSTEM_MESSAGE_IDS)
+    return ids
 
 
 def _build_frame(config: dict, packet_id: int, payload: bytes) -> bytes:

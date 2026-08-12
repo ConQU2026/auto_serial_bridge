@@ -21,7 +21,6 @@ SAMPLE_CONFIG = os.path.abspath(
 )
 
 SUPPORTED_ALGOS = ["NONE", "SUM8", "XOR8", "CRC8"]
-LOCAL_TIMESTAMP_RE = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}"
 
 
 def _load_sample_config() -> dict:
@@ -73,12 +72,6 @@ def _extract_function_body(content: str, func_name: str) -> str:
     )
     assert match is not None, f"未找到函数 {func_name}"
     return match.group("body")
-
-
-def _extract_timestamp(pattern: str, content: str, error_message: str) -> str:
-    match = re.search(pattern, content, re.MULTILINE)
-    assert match is not None, error_message
-    return match.group("ts")
 
 
 def _extract_protocol_hash(content: str) -> str:
@@ -133,7 +126,7 @@ def test_mcu_header_has_algo_macro(algo, tmpdir):
 
 
 # ============================================================================
-# 3. CRC8_TABLE 仅在 CRC8 算法下生成
+# 3. CRC8_TABLE 仅在 CRC8 算法下生成到 MCU 源文件（不在头文件中）
 # ============================================================================
 
 @pytest.mark.parametrize("algo", ["NONE", "SUM8", "XOR8"])
@@ -144,9 +137,11 @@ def test_no_crc_table_for_non_crc8(algo, tmpdir):
     result = _run_codegen(cfg, tmpdir)
     assert result.returncode == 0
 
-    content = _read_generated(tmpdir, 'mcu_output/protocol.h')
-    assert "CRC8_TABLE" not in content, \
-        f"选用 {algo} 时, protocol.h 不应包含 CRC8_TABLE"
+    header = _read_generated(tmpdir, 'mcu_output/protocol.h')
+    source = _read_generated(tmpdir, 'mcu_output/protocol.c')
+    assert "CRC8_TABLE" not in header
+    assert "CRC8_TABLE" not in source, \
+        f"选用 {algo} 时, MCU 代码不应包含 CRC8_TABLE"
 
 
 def test_crc_table_present_for_crc8(tmpdir):
@@ -156,10 +151,12 @@ def test_crc_table_present_for_crc8(tmpdir):
     result = _run_codegen(cfg, tmpdir)
     assert result.returncode == 0
 
-    content = _read_generated(tmpdir, 'mcu_output/protocol.h')
-    assert "CRC8_TABLE" in content
-    assert "0x00" in content
-    assert "0x31" in content
+    header = _read_generated(tmpdir, 'mcu_output/protocol.h')
+    source = _read_generated(tmpdir, 'mcu_output/protocol.c')
+    # 查找表放在 .c 中，避免每个 include 头文件的编译单元复制一份
+    assert "CRC8_TABLE" not in header
+    assert "CRC8_TABLE" in source
+    assert "0x31" in source
 
 
 # ============================================================================
@@ -335,37 +332,29 @@ def test_protocol_doc_checksum_desc(algo, tmpdir):
         f"PROTOCOL_DOC.md 应包含 {algo} 的描述"
 
 
-def test_generated_outputs_include_consistent_local_timestamps(tmpdir):
+def test_regeneration_with_same_config_does_not_rewrite_outputs(tmpdir):
+    """内容不变时不重写文件（保留 mtime），避免触发下游全量重编译。"""
     cfg = _load_sample_config()
 
     result = _run_codegen(cfg, tmpdir)
     assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
 
-    header_content = _read_generated(tmpdir, 'mcu_output/protocol.h')
-    source_content = _read_generated(tmpdir, 'mcu_output/protocol.c')
-    doc_content = _read_generated(tmpdir, 'mcu_output/PROTOCOL_DOC.md')
+    generated_dir = os.path.join(tmpdir, 'generated')
+    mtimes_before = {
+        name: os.path.getmtime(os.path.join(generated_dir, name))
+        for name in os.listdir(generated_dir)
+    }
 
-    header_ts = _extract_timestamp(
-        rf"^// Generated at: (?P<ts>{LOCAL_TIMESTAMP_RE})$",
-        header_content,
-        "protocol.h 顶部应包含本地时间注释",
-    )
-    source_ts = _extract_timestamp(
-        rf"^// Generated at: (?P<ts>{LOCAL_TIMESTAMP_RE})$",
-        source_content,
-        "protocol.c 顶部应包含本地时间注释",
-    )
-    doc_ts = _extract_timestamp(
-        rf"^> 生成时间：(?P<ts>{LOCAL_TIMESTAMP_RE})$",
-        doc_content,
-        "PROTOCOL_DOC.md 顶部应包含可见的生成时间说明",
-    )
+    import time
+    time.sleep(0.05)
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0
 
-    assert header_content.startswith(f"// Generated at: {header_ts}\n#pragma once\n")
-    assert source_content.startswith(f"// Generated at: {source_ts}\n#include \"protocol.h\"\n")
-    assert doc_content.startswith(f"> 生成时间：{doc_ts}\n# MCU ↔ ROS 串口通信协议文档\n")
-    assert header_ts == source_ts == doc_ts, \
-        "同一次 codegen 运行生成的时间注释应完全一致"
+    mtimes_after = {
+        name: os.path.getmtime(os.path.join(generated_dir, name))
+        for name in os.listdir(generated_dir)
+    }
+    assert mtimes_before == mtimes_after, "内容未变化时生成文件不应被重写"
 
 
 # ============================================================================
@@ -429,8 +418,8 @@ def test_generated_bindings_guard_indexed_array_input_and_resize_output(tmpdir):
         'name': 'MirrorArray',
         'id': 0x42,
         'direction': 'both',
-        'sub_topic': 'mirror_array',
-        'pub_topic': 'mirror_array',
+        'sub_topic': 'mirror_array/cmd',
+        'pub_topic': 'mirror_array/state',
         'ros_msg': 'std_msgs/msg/Float32MultiArray',
         'fields': [
             {'proto': 'first', 'type': 'f32', 'ros': 'data[0]'},
@@ -444,11 +433,12 @@ def test_generated_bindings_guard_indexed_array_input_and_resize_output(tmpdir):
     content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
     assert 'msg->data.size() < 3' in content, \
         '订阅端应先检查 Float32MultiArray.data 长度，避免越界读取'
-    assert 'msg.data.resize(3);' in content, \
-        '发布端应先 resize Float32MultiArray.data，避免越界写入'
+    assert 'detail::ensure_size(msg.data, 3)' in content, \
+        '发布端应先扩容 Float32MultiArray.data，避免越界写入'
 
 
-def test_generated_bindings_add_loopback_guard_for_same_topic_both(tmpdir):
+def test_same_topic_for_both_direction_is_rejected(tmpdir):
+    """双向消息 sub/pub 同话题会导致 MCU 数据回环发回 MCU，应在校验期拒绝。"""
     cfg = _load_sample_config()
     cfg['messages'].append({
         'name': 'LoopbackStatus',
@@ -463,15 +453,8 @@ def test_generated_bindings_add_loopback_guard_for_same_topic_both(tmpdir):
     })
 
     result = _run_codegen(cfg, tmpdir)
-    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
-
-    content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
-    assert 'const rclcpp::MessageInfo& msg_info' in content, \
-        '生成的订阅回调应接收 MessageInfo，用于识别自发回环'
-    assert 'should_skip_loopback(PACKET_ID_LOOPBACKSTATUS, msg_info)' in content, \
-        '同 topic 的双向消息应在订阅端显式跳过自身发布的回环消息'
-    assert 'register_loopback_publisher(PACKET_ID_LOOPBACKSTATUS, pub_LoopbackStatus);' in content, \
-        '生成的发布者应向节点登记，用于回环抑制'
+    assert result.returncode != 0
+    assert 'same topic' in f"{result.stdout}\n{result.stderr}"
 
 
 def test_generated_bindings_guard_int32_multiarray_to_u8_range_and_cast_output(tmpdir):
@@ -480,8 +463,8 @@ def test_generated_bindings_guard_int32_multiarray_to_u8_range_and_cast_output(t
         'name': 'ByteStatusMirror',
         'id': 0x44,
         'direction': 'both',
-        'sub_topic': 'byte_status_mirror',
-        'pub_topic': 'byte_status_mirror',
+        'sub_topic': 'byte_status_mirror/cmd',
+        'pub_topic': 'byte_status_mirror/state',
         'ros_msg': 'std_msgs/msg/Int32MultiArray',
         'fields': [
             {'proto': 'task_id', 'type': 'u8', 'ros': 'data[0]'},
@@ -501,21 +484,73 @@ def test_generated_bindings_guard_int32_multiarray_to_u8_range_and_cast_output(t
     assert 'msg.data[1] = static_cast<int32_t>(pkt->status);' in content
 
 
-def test_sample_config_heartbeat_is_both(tmpdir):
+def test_system_messages_injected_without_ros_topics(tmpdir):
+    """系统消息由生成器内置注入：结构体/枚举/文档齐全，但不生成 ROS 订阅/发布。"""
     cfg = _load_sample_config()
 
     result = _run_codegen(cfg, tmpdir)
     assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
 
-    content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
+    header = _read_generated(tmpdir, 'mcu_output/protocol.h')
+    bindings = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
     protocol_doc = _read_generated(tmpdir, 'mcu_output/PROTOCOL_DOC.md')
-    rx_section = protocol_doc.split('## 电控 → ROS（电控主动发送）', 1)[1].split('## ROS → 电控（电控被动接收）', 1)[0]
 
-    assert 'pub_Heartbeat' in content
-    assert 'case PACKET_ID_HEARTBEAT' in content
-    assert 'register_loopback_publisher(PACKET_ID_HEARTBEAT' in content
-    assert 'Heartbeat (ROS -> MCU)' in content
-    assert '### `Heartbeat`' in rx_section
+    for name, packet_id in (('ACK', 0xFD), ('HEARTBEAT', 0xFE), ('HANDSHAKE', 0xFF)):
+        assert f"PACKET_ID_{name} = {packet_id}," in header
+    assert 'Packet_Heartbeat' in header
+    assert '### `Heartbeat`' in protocol_doc
+
+    # 系统消息不映射 ROS 话题
+    assert 'pub_Heartbeat' not in bindings
+    assert 'pub_Handshake' not in bindings
+    assert 'pub_Ack' not in bindings
+    assert 'Heartbeat (ROS -> MCU)' not in bindings
+
+
+def test_explicit_system_message_in_yaml_is_rejected(tmpdir):
+    """旧版 YAML 显式写系统消息时应报错并给出迁移提示。"""
+    cfg = _load_sample_config()
+    cfg['messages'].append({
+        'name': 'Heartbeat',
+        'id': 0xFE,
+        'direction': 'both',
+        'sub_topic': 'system/heartbeat',
+        'pub_topic': 'system/heartbeat_state',
+        'ros_msg': 'std_msgs/msg/UInt32',
+        'fields': [{'proto': 'count', 'type': 'u32', 'ros': 'data'}],
+    })
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode != 0
+    combined = f"{result.stdout}\n{result.stderr}"
+    assert 'injected automatically' in combined
+
+
+def test_reliable_requires_tx_direction(tmpdir):
+    cfg = _load_sample_config()
+    cfg['messages'].append({
+        'name': 'ReliableBoth',
+        'id': 0x45,
+        'direction': 'both',
+        'reliable': True,
+        'sub_topic': 'reliable_both/cmd',
+        'pub_topic': 'reliable_both/state',
+        'ros_msg': 'std_msgs/msg/UInt32',
+        'fields': [{'proto': 'value', 'type': 'u32', 'ros': 'data'}],
+    })
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode != 0
+    assert "only supported for direction 'tx'" in f"{result.stdout}\n{result.stderr}"
+
+
+def test_empty_fields_rejected(tmpdir):
+    cfg = _load_sample_config()
+    cfg['messages'][0]['fields'] = []
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode != 0
+    assert 'at least one field' in f"{result.stdout}\n{result.stderr}"
 
 
 def test_fixture_reliable_message_includes_sequence_byte_in_compiled_wire_size(tmpdir):
@@ -688,9 +723,9 @@ def test_protocol_hash_ignores_non_wire_configuration(tmpdir):
     config_b['config']['qos_depth'] = 42
     config_b['config']['heartbeat_timeout_ms'] = 9999
     config_b['config']['reliable_retry_interval_ms'] = 777
-    config_b['messages'][3]['sub_topic'] = 'renamed/command'
-    config_b['messages'][3]['ros_msg'] = 'std_msgs/msg/Int32'
-    config_b['messages'][3]['notes'] = 'changed documentation only'
+    config_b['messages'][0]['sub_topic'] = 'renamed/command'
+    config_b['messages'][0]['ros_msg'] = 'std_msgs/msg/Int32'
+    config_b['messages'][0]['notes'] = 'changed documentation only'
 
     result_a = _run_codegen(config_a, tmpdir)
     assert result_a.returncode == 0, f"codegen failed:\n{result_a.stdout}\n{result_a.stderr}"
@@ -708,10 +743,11 @@ def test_protocol_hash_ignores_non_wire_configuration(tmpdir):
         "topic、port、baudrate、ros_msg、QoS、notes 和超时重试参数不应改变 PROTOCOL_HASH"
 
 
-def test_protocol_hash_changes_when_message_order_changes(tmpdir):
+def test_protocol_hash_ignores_message_order_in_yaml(tmpdir):
+    """哈希按消息 ID 排序计算，YAML 中的书写顺序不影响协议哈希。"""
     config_a = _load_sample_config()
     config_b = _load_sample_config()
-    config_b['messages'][3], config_b['messages'][4] = config_b['messages'][4], config_b['messages'][3]
+    config_b['messages'] = list(reversed(config_b['messages']))
 
     result_a = _run_codegen(config_a, tmpdir)
     assert result_a.returncode == 0, f"codegen failed:\n{result_a.stdout}\n{result_a.stderr}"
@@ -725,8 +761,28 @@ def test_protocol_hash_changes_when_message_order_changes(tmpdir):
     finally:
         shutil.rmtree(alt_dir, ignore_errors=True)
 
-    assert hash_a != hash_b, \
-        "messages 列表顺序变化应视为真实协议变化，PROTOCOL_HASH 不应保持一致"
+    assert hash_a == hash_b, \
+        "仅调整 messages 书写顺序不应改变 PROTOCOL_HASH"
+
+
+def test_protocol_hash_changes_when_field_type_changes(tmpdir):
+    config_a = _load_sample_config()
+    config_b = _load_sample_config()
+    config_b['messages'][0]['fields'][0]['type'] = 'u16'
+
+    result_a = _run_codegen(config_a, tmpdir)
+    assert result_a.returncode == 0, f"codegen failed:\n{result_a.stdout}\n{result_a.stderr}"
+    hash_a = _extract_protocol_hash(_read_generated(tmpdir, 'mcu_output/protocol.h'))
+
+    alt_dir = tempfile.mkdtemp(prefix='codegen_type_')
+    try:
+        result_b = _run_codegen(config_b, alt_dir)
+        assert result_b.returncode == 0, f"codegen failed:\n{result_b.stdout}\n{result_b.stderr}"
+        hash_b = _extract_protocol_hash(_read_generated(alt_dir, 'mcu_output/protocol.h'))
+    finally:
+        shutil.rmtree(alt_dir, ignore_errors=True)
+
+    assert hash_a != hash_b, "字段类型变化必须改变 PROTOCOL_HASH"
 
 
 @pytest.mark.parametrize("ignore_version_mismatch", [True, False])

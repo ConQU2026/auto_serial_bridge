@@ -2,10 +2,11 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>auto_serial_bridge</name>
-  <version>1.0.0</version>
-  <description>Config-driven serial bridge and protocol generator for ROS 2.</description>
+  <version>2.0.0</version>
+  <description>Config-driven ROS 2 to MCU communication package: define the protocol once in YAML, generate code for both sides.</description>
   <maintainer email="i@muelsyse.us">qichen chen</maintainer>
   <license>Apache-2.0</license>
+  <url type="repository">https://github.com/ConQU2026/auto_serial_bridge</url>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
@@ -25,6 +26,7 @@
   <test_depend>python3-pytest</test_depend>
   <test_depend>rclpy</test_depend>
   <test_depend>python3-serial</test_depend>
+  <test_depend>socat</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

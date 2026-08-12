@@ -37,12 +37,13 @@ if ! [[ "$ALIAS_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
     exit 1
 fi
 
-# 提取设备信息
+# 提取设备信息（用属性查询而非解析 -a 树形输出，避免误取上级 hub 的属性）
 echo -e "\n正在读取 $SOURCE_DEV 的硬件信息..."
 
-VID=$(udevadm info -a -n "$SOURCE_DEV" | grep 'ATTRS{idVendor}' | head -n 1 | awk -F "==" '{print $2}' | sed 's/"//g')
-PID=$(udevadm info -a -n "$SOURCE_DEV" | grep 'ATTRS{idProduct}' | head -n 1 | awk -F "==" '{print $2}' | sed 's/"//g')
-SERIAL=$(udevadm info -a -n "$SOURCE_DEV" | grep 'ATTRS{serial}' | head -n 1 | awk -F "==" '{print $2}' | sed 's/"//g')
+DEV_PROPS=$(udevadm info -q property -n "$SOURCE_DEV")
+VID=$(echo "$DEV_PROPS" | sed -n 's/^ID_VENDOR_ID=//p' | head -n 1)
+PID=$(echo "$DEV_PROPS" | sed -n 's/^ID_MODEL_ID=//p' | head -n 1)
+SERIAL=$(echo "$DEV_PROPS" | sed -n 's/^ID_SERIAL_SHORT=//p' | head -n 1)
 
 # 检查是否成功获取
 if [ -z "$VID" ] || [ -z "$PID" ]; then
@@ -61,10 +62,7 @@ RULES_FILE="/etc/udev/rules.d/99-${ALIAS_NAME}.rules"
 
 echo -e "\n正在生成规则文件: $RULES_FILE ..."
 
-UACCESS_TAG=""
-if udevadm --version >/dev/null 2>&1; then
-    UACCESS_TAG=', TAG+="uaccess"'
-fi
+UACCESS_TAG=', TAG+="uaccess"'
 
 if [ -n "$SERIAL" ]; then
     RULE_CONTENT="KERNEL==\"tty*\", SUBSYSTEMS==\"usb\", ATTRS{idVendor}==\"$VID\", ATTRS{idProduct}==\"$PID\", ATTRS{serial}==\"$SERIAL\", MODE=\"0660\", GROUP=\"dialout\"${UACCESS_TAG}, ENV{ID_MM_DEVICE_IGNORE}=\"1\", SYMLINK+=\"$ALIAS_NAME\""
