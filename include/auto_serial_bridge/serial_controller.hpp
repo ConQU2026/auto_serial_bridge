@@ -177,18 +177,22 @@ namespace auto_serial_bridge
     }
 
   private:
+    struct TxRequest;
+
     void get_parameters();
     void publish_ready(bool ready);
     void start_receive();
     void async_send(std::vector<uint8_t> packet_bytes);
-    bool async_send_impl(std::vector<uint8_t> packet_bytes);
+    void async_send_impl(
+        std::vector<uint8_t> packet_bytes,
+        std::function<void(bool)> completion = {});
     void start_next_write();
     void complete_serial_op();
     void notify_serial_ops_drained();
     void handle_write(
         const std::shared_ptr<asio::serial_port> &port,
         uint64_t generation,
-        const std::shared_ptr<std::vector<uint8_t>> &packet_bytes,
+        const std::shared_ptr<TxRequest> &request,
         const asio::error_code &error,
         size_t bytes_transferred);
     void log_mcu_tx(const std::vector<uint8_t> &packet_bytes) const;
@@ -230,7 +234,13 @@ namespace auto_serial_bridge
     // 复用的接收缓冲区。同一时刻只有一个在途读操作（都在 strand 上串行），
     // 析构时会等待所有串口操作 drain，因此生命周期安全。
     std::array<uint8_t, 2048> rx_buffer_{};
-    std::deque<std::shared_ptr<std::vector<uint8_t>>> tx_queue_;
+    struct TxRequest
+    {
+      std::vector<uint8_t> bytes;
+      std::function<void(bool)> completion;
+    };
+    static constexpr size_t MAX_TX_QUEUE_SIZE = 1024;
+    std::deque<std::shared_ptr<TxRequest>> tx_queue_;
     bool tx_write_in_progress_ = false;
     size_t pending_serial_ops_ = 0;
     bool shutdown_requested_ = false;

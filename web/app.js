@@ -39,6 +39,22 @@
     [0xff, "Handshake"],
   ]);
   const RESERVED_NAMES = new Set(["Ack", "Heartbeat", "Handshake"]);
+  const C_CPP_KEYWORDS = new Set([
+    "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic",
+    "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local",
+    "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor",
+    "bool", "break", "case", "catch", "char", "char16_t", "char32_t", "class",
+    "compl", "concept", "const", "constexpr", "const_cast", "continue", "co_await",
+    "co_return", "co_yield", "decltype", "default", "delete", "do", "double",
+    "dynamic_cast", "else", "enum", "explicit", "export", "extern", "false", "float",
+    "for", "friend", "goto", "if", "inline", "int", "long", "mutable", "namespace",
+    "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq",
+    "private", "protected", "public", "register", "reinterpret_cast", "requires", "restrict",
+    "return", "short", "signed", "sizeof", "static", "static_assert", "static_cast",
+    "struct", "switch", "template", "this", "thread_local", "throw", "true", "try",
+    "typedef", "typeid", "typename", "union", "unsigned", "using", "virtual", "void",
+    "volatile", "wchar_t", "while", "xor", "xor_eq",
+  ]);
   const SYSTEM_MAX_WIRE_PAYLOAD = 4; // Heartbeat/Handshake payload = 4 字节
 
   const IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -106,6 +122,10 @@
 
   function normalizeString(value) {
     return typeof value === "string" ? value : value == null ? "" : String(value);
+  }
+
+  function isReservedCppIdentifier(value) {
+    return C_CPP_KEYWORDS.has(value) || value.startsWith("__") || /^_[A-Z]/.test(value);
   }
 
   function normalizeBoolean(value, fallback = false) {
@@ -368,6 +388,9 @@
 
     const seenIds = new Map();
     const seenNames = new Set();
+    const seenGeneratedSymbols = new Map(
+      Array.from(RESERVED_NAMES, (name) => [name.toUpperCase(), name]),
+    );
     const seenSubTopics = new Map();
     const seenPubTopics = new Map();
     let largestWirePayload = SYSTEM_MAX_WIRE_PAYLOAD;
@@ -383,6 +406,12 @@
         errors.push(`消息名 '${message.name}' 重复。`);
       } else {
         seenNames.add(message.name);
+        const generatedSymbol = message.name.toUpperCase();
+        if (seenGeneratedSymbols.has(generatedSymbol)) {
+          errors.push(`消息 '${label}' 生成的符号 PACKET_ID_${generatedSymbol} 与 '${seenGeneratedSymbols.get(generatedSymbol)}' 冲突。`);
+        } else {
+          seenGeneratedSymbols.set(generatedSymbol, message.name);
+        }
       }
 
       if (!Number.isInteger(message.id) || message.id < 0 || message.id > 255) {
@@ -445,6 +474,8 @@
         const fieldLabel = `消息 '${label}' 的 field[${fieldIndex}]`;
         if (!IDENTIFIER_RE.test(normalizeString(field.proto))) {
           errors.push(`${fieldLabel} 的 proto '${normalizeString(field.proto)}' 必须是合法 C 标识符。`);
+        } else if (isReservedCppIdentifier(field.proto)) {
+          errors.push(`${fieldLabel} 的 proto '${field.proto}' 是 C/C++ 保留标识符。`);
         } else if (seenFieldNames.has(field.proto)) {
           errors.push(`消息 '${label}' 的字段名 '${field.proto}' 重复。`);
         } else {
@@ -658,7 +689,7 @@
         { label: "启用握手", path: "config.require_handshake", type: "checkbox", value: config.require_handshake },
         { label: "忽略协议版本不匹配", path: "config.ignore_version_mismatch", type: "checkbox", value: config.ignore_version_mismatch },
         { label: "可靠传输重试间隔 (ms)", path: "config.reliable_retry_interval_ms", type: "number", value: config.reliable_retry_interval_ms },
-        { label: "可靠传输最大重试次数", path: "config.reliable_max_retries", type: "number", value: config.reliable_max_retries },
+        { label: "可靠传输重试告警阈值", path: "config.reliable_max_retries", type: "number", value: config.reliable_max_retries },
         { label: "严格心跳检测", path: "config.strict_heartbeat", type: "checkbox", value: config.strict_heartbeat },
       ];
 

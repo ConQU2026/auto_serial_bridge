@@ -488,8 +488,8 @@ def test_generated_bindings_guard_int32_multiarray_to_u8_range_and_cast_output(t
     assert 'field status is out of uint8 range [0, 255]' in content
     assert 'pkt.task_id = static_cast<uint8_t>(msg->data[0]);' in content
     assert 'pkt.status = static_cast<uint8_t>(msg->data[1]);' in content
-    assert 'msg.data[0] = static_cast<int32_t>(pkt->task_id);' in content
-    assert 'msg.data[1] = static_cast<int32_t>(pkt->status);' in content
+    assert 'msg.data[0] = static_cast<int32_t>(pkt.task_id);' in content
+    assert 'msg.data[1] = static_cast<int32_t>(pkt.status);' in content
 
 
 def test_system_messages_injected_without_ros_topics(tmpdir):
@@ -550,6 +550,64 @@ def test_reliable_requires_tx_direction(tmpdir):
     result = _run_codegen(cfg, tmpdir)
     assert result.returncode != 0
     assert "only supported for direction 'tx'" in f"{result.stdout}\n{result.stderr}"
+
+
+@pytest.mark.parametrize('name', ['ack', 'ACK'])
+def test_message_names_cannot_collide_with_generated_system_symbols(name, tmpdir):
+    cfg = _load_sample_config()
+    cfg['messages'][0]['name'] = name
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode != 0
+    assert 'generated symbol' in result.stderr
+
+
+def test_message_names_cannot_collide_after_uppercasing(tmpdir):
+    cfg = _load_sample_config()
+    cfg['messages'][0]['name'] = 'Foo'
+    duplicate = dict(cfg['messages'][0])
+    duplicate['name'] = 'FOO'
+    duplicate['id'] = 0x22
+    duplicate['sub_topic'] = 'duplicate/foo'
+    cfg['messages'].append(duplicate)
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode != 0
+    assert 'generated symbol' in result.stderr
+
+
+@pytest.mark.parametrize('keyword', ['class', 'switch', 'alignas', '_Atomic', '_Foo', '__foo'])
+def test_c_cpp_reserved_identifiers_are_rejected_for_fields(keyword, tmpdir):
+    cfg = _load_sample_config()
+    cfg['messages'][0]['fields'][0]['proto'] = keyword
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode != 0
+    assert 'reserved by C/C++' in result.stderr
+
+
+def test_generated_cpp_decoding_copies_bytes_into_packet_objects(tmpdir):
+    cfg = _load_sample_config()
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, result.stderr
+
+    content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_bindings.hpp')
+    assert 'std::memcpy(&pkt, payload.data(), sizeof(pkt));' in content
+    assert 'std::memcpy(&pkt, data.data(), sizeof(pkt));' in content
+    assert 'reinterpret_cast<const Packet_' not in content
+
+
+def test_reliable_mcu_callback_runs_before_ack(tmpdir):
+    cfg = _load_sample_config()
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode == 0, result.stderr
+
+    content = _read_generated(tmpdir, 'mcu_output/protocol.c')
+    callback = 'on_receive_FixtureReliableCommand((Packet_FixtureReliableCommand*)rx_buffer);'
+    ack = 'send_reliable_ack(PACKET_ID_FIXTURERELIABLECOMMAND);'
+    assert callback in content
+    assert ack in content
+    assert content.index(callback) < content.index(ack)
 
 
 def test_empty_fields_rejected(tmpdir):

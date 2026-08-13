@@ -28,22 +28,19 @@ namespace auto_serial_bridge
     reliable_sender_ = std::make_shared<ReliableSender>(
         ctx_->ios(),
         *serial_strand_,
-        [this](const std::vector<uint8_t> &packet_bytes)
+        [this](
+            const std::vector<uint8_t> &packet_bytes,
+            ReliableSender::SendCompletion completion)
         {
-          const bool sent = async_send_impl(packet_bytes);
-          if (sent)
-          {
-            tx_packet_count_++;
-          }
-          return sent;
+          async_send_impl(packet_bytes, std::move(completion));
         },
-        [this](PacketID id, int max_retries)
+        [this](PacketID id, int retry_threshold)
         {
-          RCLCPP_ERROR(
+          RCLCPP_WARN(
               this->get_logger(),
-              "Reliable send failed for packet id=0x%02X after %d retries",
+              "Reliable packet id=0x%02X is still awaiting ACK after another %d retries",
               static_cast<unsigned int>(id),
-              max_retries);
+              retry_threshold);
         },
         std::chrono::milliseconds(config::RELIABLE_RETRY_INTERVAL_MS),
         config::RELIABLE_MAX_RETRIES);
@@ -200,11 +197,19 @@ namespace auto_serial_bridge
     ++connection_generation_;
     shutdown_requested_ = true;
 
-    if (reliable_sender_)
+    if (reliable_sender_ && shutting_down_.load(std::memory_order_acquire))
     {
       reliable_sender_->clear_all();
     }
 
+    for (auto &request : tx_queue_)
+    {
+      if (request->completion)
+      {
+        auto completion = std::move(request->completion);
+        completion(false);
+      }
+    }
     tx_queue_.clear();
     tx_write_in_progress_ = false;
 
@@ -293,13 +298,13 @@ namespace auto_serial_bridge
       return;
     }
 
-    const auto *data = reinterpret_cast<const Packet_Handshake *>(pkt.payload.data());
+    const auto data = pkt.as<Packet_Handshake>();
     const std::string hash_pair = detail::format_hash_pair(
         PROTOCOL_HASH,
-        data->protocol_hash);
+        data.protocol_hash);
     const auto validation = detail::classify_handshake_validation(
         PROTOCOL_HASH,
-        data->protocol_hash,
+        data.protocol_hash,
         config::IGNORE_VERSION_MISMATCH);
 
     const auto enter_running_state = [this]()
@@ -504,8 +509,8 @@ namespace auto_serial_bridge
     {
       if (pkt.payload.size() == sizeof(Packet_Heartbeat))
       {
-        const auto *data = reinterpret_cast<const Packet_Heartbeat *>(pkt.payload.data());
-        if (data->count == last_heartbeat_tx_count_)
+        const auto data = pkt.as<Packet_Heartbeat>();
+        if (data.count == last_heartbeat_tx_count_)
         {
           // 正常 ACK 或迟到的 ACK（非严格模式超时重置后才回传），都视为有效
           awaiting_heartbeat_ack_ = false;
@@ -514,7 +519,7 @@ namespace auto_serial_bridge
             RCLCPP_DEBUG(
                 this->get_logger(),
                 "Heartbeat ACK matched: count=%u, state=%s",
-                data->count,
+                data.count,
                 state_name());
           }
         }
@@ -526,7 +531,7 @@ namespace auto_serial_bridge
               this->get_logger(), *this->get_clock(), 2000,
               "心跳计数不匹配: expected=%u, got=%u, state=%s, payload=[%s]",
               last_heartbeat_tx_count_,
-              data->count,
+              data.count,
               state_name(),
               payload_hex.c_str());
         }
@@ -549,8 +554,8 @@ namespace auto_serial_bridge
     {
       if (pkt.payload.size() == sizeof(Packet_Ack))
       {
-        const auto *data = reinterpret_cast<const Packet_Ack *>(pkt.payload.data());
-        reliable_sender_->on_ack_received(data->acked_id, data->ack_seq);
+        const auto data = pkt.as<Packet_Ack>();
+        reliable_sender_->on_ack_received(data.acked_id, data.ack_seq);
       }
       else
       {
@@ -671,10 +676,7 @@ namespace auto_serial_bridge
   {
     post_serial([this, packet_bytes = std::move(packet_bytes)]() mutable
                 {
-                  if (async_send_impl(std::move(packet_bytes)))
-                  {
-                    tx_packet_count_++;
-                  }
+                  async_send_impl(std::move(packet_bytes));
                 });
   }
 
@@ -753,16 +755,20 @@ namespace auto_serial_bridge
         describe_protocol_packet(id, payload).c_str());
   }
 
-  bool SerialController::async_send_impl(std::vector<uint8_t> packet_bytes)
+  void SerialController::async_send_impl(
+      std::vector<uint8_t> packet_bytes,
+      std::function<void(bool)> completion)
   {
     if (!is_connected_ || !serial_port_)
     {
-      return false;
+      if (completion) completion(false);
+      return;
     }
 
     if (!serial_port_->is_open())
     {
-      return false;
+      if (completion) completion(false);
+      return;
     }
 
     if constexpr (config::REQUIRE_HANDSHAKE)
@@ -781,25 +787,47 @@ namespace auto_serial_bridge
                 static_cast<unsigned int>(id_byte),
                 state_name());
           }
-          return false;
+          if (completion) completion(false);
+          return;
         }
       }
     }
 
+    if (tx_queue_.size() >= MAX_TX_QUEUE_SIZE)
+    {
+      RCLCPP_ERROR_THROTTLE(
+          this->get_logger(), *this->get_clock(), 2000,
+          "Serial TX queue is full (%zu frames); rejecting packet",
+          MAX_TX_QUEUE_SIZE);
+      if (completion) completion(false);
+      return;
+    }
+
+    std::shared_ptr<TxRequest> request;
     try
     {
       log_mcu_tx(packet_bytes);
-      tx_queue_.push_back(std::make_shared<std::vector<uint8_t>>(std::move(packet_bytes)));
+      request = std::make_shared<TxRequest>();
+      request->bytes = std::move(packet_bytes);
+      request->completion = std::move(completion);
+      tx_queue_.push_back(request);
       start_next_write();
     }
     catch (const std::exception &e)
     {
       RCLCPP_ERROR(this->get_logger(), "Send error: %s", e.what());
+      if (request && request->completion)
+      {
+        auto request_completion = std::move(request->completion);
+        request_completion(false);
+      }
+      else if (completion)
+      {
+        completion(false);
+      }
       reset_serial();
-      return false;
+      return;
     }
-
-    return true;
   }
 
   void SerialController::start_next_write()
@@ -811,6 +839,14 @@ namespace auto_serial_bridge
 
     if (!is_connected_ || !serial_port_ || !serial_port_->is_open())
     {
+      for (auto &request : tx_queue_)
+      {
+        if (request->completion)
+        {
+          auto completion = std::move(request->completion);
+          completion(false);
+        }
+      }
       tx_queue_.clear();
       tx_write_in_progress_ = false;
       return;
@@ -818,7 +854,7 @@ namespace auto_serial_bridge
 
     const auto port = serial_port_;
     const auto generation = connection_generation_;
-    const auto packet_bytes = tx_queue_.front();
+    const auto request = tx_queue_.front();
     tx_write_in_progress_ = true;
     ++pending_serial_ops_;
 
@@ -826,20 +862,19 @@ namespace auto_serial_bridge
     {
       asio::async_write(
           *port,
-          asio::buffer(*packet_bytes),
+          asio::buffer(request->bytes),
           serial_strand_->wrap(
-              [this, port, generation, packet_bytes](
+              [this, port, generation, request](
                   const asio::error_code &error,
                   const size_t bytes_transferred)
               {
-                handle_write(port, generation, packet_bytes, error, bytes_transferred);
+                handle_write(port, generation, request, error, bytes_transferred);
               }));
     }
     catch (const std::exception &e)
     {
       complete_serial_op();
       tx_write_in_progress_ = false;
-      tx_queue_.clear();
       RCLCPP_ERROR(
           this->get_logger(),
           "Failed to start serial write on '%s': %s",
@@ -852,7 +887,7 @@ namespace auto_serial_bridge
   void SerialController::handle_write(
       const std::shared_ptr<asio::serial_port> &port,
       uint64_t generation,
-      const std::shared_ptr<std::vector<uint8_t>> &packet_bytes,
+      const std::shared_ptr<TxRequest> &request,
       const asio::error_code &error,
       size_t)
   {
@@ -864,9 +899,20 @@ namespace auto_serial_bridge
     }
 
     tx_write_in_progress_ = false;
-    if (!tx_queue_.empty() && tx_queue_.front() == packet_bytes)
+    if (!tx_queue_.empty() && tx_queue_.front() == request)
     {
       tx_queue_.pop_front();
+    }
+
+    if (request->completion)
+    {
+      auto completion = std::move(request->completion);
+      completion(!error);
+    }
+
+    if (!error)
+    {
+      tx_packet_count_++;
     }
 
     if (error)

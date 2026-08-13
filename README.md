@@ -120,10 +120,12 @@ local）：串口打开且握手完成为 `true`，断连、心跳超时或重�
   环境建议保持）断开串口并自动重连；`false` 只告警不重连，仅建议调试时使用
   （链路停滞时发送队列会持续堆积）。要求 `heartbeat_timeout_ms >=
   heartbeat_interval_ms`。
-- `reliable_retry_interval_ms` / `reliable_max_retries`：可靠消息的重传参数。
-  重试耗尽即丢弃并报错（默认 100ms × 3 次）。断连重连期间发布的可靠消息同样
-  受此上限约束：关键指令应在 `auto_serial_bridge/ready` 为 `true` 时再发，
-  或按可容忍的断连时长调大重试参数。
+- `reliable_retry_interval_ms` / `reliable_max_retries`：可靠消息的重传间隔与
+  告警阈值。可靠消息按 ID 依次发送，并持续重试到收到匹配 ACK，在 ROS 节点
+  进程存活期间提供跨串口断连/重连的链路级 at-least-once 投递；
+  `reliable_max_retries` 每累计达到一次就输出告警，但不会丢弃消息。断连期间
+  可靠消息会保留并在重连、握手完成后继续发送，因此发布端应根据链路容量控制
+  速率，并让 MCU 回调保持幂等。节点进程崩溃后的恢复不在保证范围内。
 - `buffer_size`：接收缓冲区，须能容纳最大完整帧。
 
 字段类型支持 `uint8_t`、`uint16_t`、`uint32_t`、`int32_t`、`float`（32 位

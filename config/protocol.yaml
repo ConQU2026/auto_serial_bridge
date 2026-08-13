@@ -20,7 +20,7 @@ config:
   heartbeat_interval_ms: 1000   # 心跳发送间隔，由 ROS 端周期发起
   heartbeat_timeout_ms: 3000    # 心跳确认超时，须 >= heartbeat_interval_ms
   reliable_retry_interval_ms: 100
-  reliable_max_retries: 3
+  reliable_max_retries: 3       # 未收到 ACK 时每累计此次数输出告警；仍会继续重试
   qos_depth: 10
 
 # 字段类型别名 -> 定长 C 类型。支持 uint8_t/uint16_t/uint32_t/int32_t/float。

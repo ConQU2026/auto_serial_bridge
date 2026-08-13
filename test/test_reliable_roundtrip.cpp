@@ -46,13 +46,15 @@ protected:
     sender_ = std::make_shared<auto_serial_bridge::ReliableSender>(
       io_,
       strand_,
-      [this](const std::vector<uint8_t> & frame) {
+      [this](
+          const std::vector<uint8_t> & frame,
+          auto_serial_bridge::ReliableSender::SendCompletion completion) {
         {
           std::lock_guard<std::mutex> lock(mutex_);
           sent_frames_.push_back(frame);
         }
         cv_.notify_all();
-        return true;
+        completion(true);
       },
       [](PacketID, int) {},
       retry_interval,

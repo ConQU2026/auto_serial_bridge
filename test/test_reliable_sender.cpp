@@ -55,14 +55,16 @@ namespace
       return std::make_shared<auto_serial_bridge::ReliableSender>(
           io_,
           strand_,
-          [this](const std::vector<uint8_t> &packet_bytes)
+          [this](
+              const std::vector<uint8_t> &packet_bytes,
+              auto_serial_bridge::ReliableSender::SendCompletion completion)
           {
             {
               std::lock_guard<std::mutex> lock(mutex_);
               sent_packets_.push_back(packet_bytes);
             }
             cv_.notify_all();
-            return true;
+            completion(true);
           },
           [this](PacketID id, int retries)
           {
@@ -183,7 +185,7 @@ namespace
     EXPECT_GE(sent_count(), 2u);
   }
 
-  TEST_F(ReliableSenderTest, MaxRetriesExceeded)
+  TEST_F(ReliableSenderTest, RetryThresholdWarnsButKeepsRetrying)
   {
     auto sender = create_sender(20ms, 1);
     auto bytes = pack_heartbeat(1);
@@ -192,16 +194,17 @@ namespace
 
     ASSERT_TRUE(wait_for([this]()
                          { return exhausted_events_.size() == 1; }, 300ms));
-    EXPECT_EQ(sent_count(), 2u);
+    ASSERT_TRUE(wait_for([this]()
+                         { return sent_packets_.size() >= 3; }, 300ms));
 
     const auto exhausted = first_exhausted_event();
     EXPECT_EQ(exhausted.id, PACKET_ID_HEARTBEAT);
     EXPECT_EQ(exhausted.max_retries, 1);
   }
 
-  TEST_F(ReliableSenderTest, NewSendOverridesPending)
+  TEST_F(ReliableSenderTest, SameIdMessagesWaitForPreviousAck)
   {
-    auto sender = create_sender(30ms, 2);
+    auto sender = create_sender(200ms, 2);
     auto first = pack_heartbeat(1);
     auto second = pack_heartbeat(2);
 
@@ -210,15 +213,16 @@ namespace
                          { return sent_packets_.size() == 1; }, 200ms));
 
     sender->send(PACKET_ID_HEARTBEAT, second);
+    std::this_thread::sleep_for(50ms);
+    ASSERT_EQ(sent_count(), 1u);
+
+    const uint8_t first_seq = extract_seq_from_frame(sent_packet_at(0));
+    sender->on_ack_received(static_cast<uint8_t>(PACKET_ID_HEARTBEAT), first_seq);
+
     ASSERT_TRUE(wait_for([this]()
                          { return sent_packets_.size() == 2; }, 200ms));
-    ASSERT_TRUE(wait_for([this]()
-                         { return sent_packets_.size() >= 3; }, 250ms));
-
-    // 最后重发的帧 payload 应与 second 一致（seq 之前的部分）
-    const auto last_sent = latest_sent_packet();
-    const auto second_sent = sent_packet_at(1);
-    EXPECT_EQ(last_sent, second_sent);
+    EXPECT_NE(extract_seq_from_frame(sent_packet_at(0)),
+              extract_seq_from_frame(sent_packet_at(1)));
   }
 
   TEST_F(ReliableSenderTest, ResetClearsPending)
@@ -249,8 +253,12 @@ namespace
                          { return sent_packets_.size() == 1; }, 200ms));
     const uint8_t seq1 = extract_seq_from_frame(sent_packet_at(0));
 
-    // 发送第二版（覆盖第一版）
+    // 第二条同 ID 消息在第一条完成前保持排队
     sender->send(PACKET_ID_HEARTBEAT, second);
+    std::this_thread::sleep_for(20ms);
+    ASSERT_EQ(sent_count(), 1u);
+
+    sender->on_ack_received(static_cast<uint8_t>(PACKET_ID_HEARTBEAT), seq1);
     ASSERT_TRUE(wait_for([this]()
                          { return sent_packets_.size() == 2; }, 200ms));
     const uint8_t seq2 = extract_seq_from_frame(sent_packet_at(1));
@@ -275,6 +283,110 @@ namespace
     std::this_thread::sleep_for(100ms);
     EXPECT_EQ(sent_count(), final_count);
     EXPECT_EQ(exhausted_count(), 0u);
+  }
+
+  TEST_F(ReliableSenderTest, RetryTimerStartsAfterWriteCompletion)
+  {
+    std::mutex completion_mutex;
+    std::vector<auto_serial_bridge::ReliableSender::SendCompletion> completions;
+    auto sender = std::make_shared<auto_serial_bridge::ReliableSender>(
+        io_, strand_,
+        [this, &completion_mutex, &completions](
+            const std::vector<uint8_t> &packet_bytes,
+            auto_serial_bridge::ReliableSender::SendCompletion completion)
+        {
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sent_packets_.push_back(packet_bytes);
+          }
+          {
+            std::lock_guard<std::mutex> lock(completion_mutex);
+            completions.push_back(std::move(completion));
+          }
+          cv_.notify_all();
+        },
+        [](PacketID, int) {}, 30ms, 1);
+
+    sender->send(PACKET_ID_HEARTBEAT, pack_heartbeat(1));
+    ASSERT_TRUE(wait_for([this]() { return sent_packets_.size() == 1; }, 200ms));
+    std::this_thread::sleep_for(80ms);
+    EXPECT_EQ(sent_count(), 1u);
+
+    auto_serial_bridge::ReliableSender::SendCompletion completion;
+    {
+      std::lock_guard<std::mutex> lock(completion_mutex);
+      ASSERT_FALSE(completions.empty());
+      completion = std::move(completions.front());
+      completions.erase(completions.begin());
+    }
+    completion(true);
+
+    ASSERT_TRUE(wait_for([this]() { return sent_packets_.size() == 2; }, 200ms));
+  }
+
+  TEST_F(ReliableSenderTest, FailedWriteRemainsPendingAndRetries)
+  {
+    auto sender = std::make_shared<auto_serial_bridge::ReliableSender>(
+        io_, strand_,
+        [this](
+            const std::vector<uint8_t> &packet_bytes,
+            auto_serial_bridge::ReliableSender::SendCompletion completion)
+        {
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sent_packets_.push_back(packet_bytes);
+          }
+          cv_.notify_all();
+          completion(false);
+        },
+        [](PacketID, int) {}, 20ms, 2);
+
+    sender->send(PACKET_ID_HEARTBEAT, pack_heartbeat(1));
+    ASSERT_TRUE(wait_for([this]() { return sent_packets_.size() >= 2; }, 200ms));
+    EXPECT_EQ(sent_packet_at(0), sent_packet_at(1));
+  }
+
+  TEST_F(ReliableSenderTest, AckBeforeWriteCompletionDoesNotAdvanceQueue)
+  {
+    std::mutex completion_mutex;
+    std::vector<auto_serial_bridge::ReliableSender::SendCompletion> completions;
+    auto sender = std::make_shared<auto_serial_bridge::ReliableSender>(
+        io_, strand_,
+        [this, &completion_mutex, &completions](
+            const std::vector<uint8_t> &packet_bytes,
+            auto_serial_bridge::ReliableSender::SendCompletion completion)
+        {
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sent_packets_.push_back(packet_bytes);
+          }
+          {
+            std::lock_guard<std::mutex> lock(completion_mutex);
+            completions.push_back(std::move(completion));
+          }
+          cv_.notify_all();
+        },
+        [](PacketID, int) {}, 200ms, 2);
+
+    sender->send(PACKET_ID_HEARTBEAT, pack_heartbeat(1));
+    sender->send(PACKET_ID_HEARTBEAT, pack_heartbeat(2));
+    ASSERT_TRUE(wait_for([this]() { return sent_packets_.size() == 1; }, 200ms));
+    const uint8_t seq = extract_seq_from_frame(sent_packet_at(0));
+
+    sender->on_ack_received(static_cast<uint8_t>(PACKET_ID_HEARTBEAT), seq);
+    std::this_thread::sleep_for(20ms);
+    EXPECT_EQ(sent_count(), 1u);
+
+    auto_serial_bridge::ReliableSender::SendCompletion completion;
+    {
+      std::lock_guard<std::mutex> lock(completion_mutex);
+      completion = std::move(completions.front());
+      completions.erase(completions.begin());
+    }
+    completion(true);
+    sender->on_ack_received(static_cast<uint8_t>(PACKET_ID_HEARTBEAT), seq);
+
+    ASSERT_TRUE(wait_for([this]() { return sent_packets_.size() == 2; }, 200ms));
   }
 
 } // namespace
