@@ -19,7 +19,6 @@ namespace auto_serial_bridge
         state_(config::REQUIRE_HANDSHAKE ? State::WAITING_HANDSHAKE : State::RUNNING),
         ctx_(std::make_shared<drivers::common::IoContext>(2)),
         packet_handler_(auto_serial_bridge::config::BUFFER_SIZE),
-        enable_heartbeat_(config::ENABLE_HEARTBEAT),
         strict_heartbeat_(config::STRICT_HEARTBEAT),
         heartbeat_timeout_ms_(static_cast<int>(config::HEARTBEAT_TIMEOUT_MS))
   {
@@ -64,7 +63,7 @@ namespace auto_serial_bridge
         std::bind(&SerialController::check_connection, this));
 
     heartbeat_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(1000),
+        std::chrono::milliseconds(config::HEARTBEAT_INTERVAL_MS),
         [this]()
         {
           post_serial([this]()
@@ -77,6 +76,10 @@ namespace auto_serial_bridge
   {
     heartbeat_timer_.reset();
     timer_.reset();
+    // 先停掉 ROS 侧入口再排空串口操作：置位后 post_serial 不再受理新任务，
+    // 防止订阅回调等在排空完成后仍向 strand 投递捕获 this 的任务
+    subscriptions_.clear();
+    shutting_down_.store(true, std::memory_order_release);
 
     if (serial_strand_ && !serial_strand_->running_in_this_thread())
     {
@@ -104,6 +107,10 @@ namespace auto_serial_bridge
 
   void SerialController::post_serial(std::function<void()> task)
   {
+    if (shutting_down_.load(std::memory_order_acquire))
+    {
+      return;
+    }
     if (!serial_strand_)
     {
       task();
@@ -126,23 +133,22 @@ namespace auto_serial_bridge
 
     RCLCPP_INFO(
         this->get_logger(),
-        "Port: %s, Baudrate: %u, DebugRawFrame: %s, EnableHeartbeat: %s, StrictHeartbeat: %s, HeartbeatTimeout: %dms",
+        "Port: %s, Baudrate: %u, DebugRawFrame: %s, StrictHeartbeat: %s, HeartbeatInterval: %dms, HeartbeatTimeout: %dms",
         port_.c_str(),
         baudrate_,
         debug_raw_frame_ ? "true" : "false",
-        enable_heartbeat_ ? "true" : "false",
         strict_heartbeat_ ? "true" : "false",
+        static_cast<int>(config::HEARTBEAT_INTERVAL_MS),
         heartbeat_timeout_ms_);
     RCLCPP_DEBUG(
         this->get_logger(),
-        "Mode selection: handshake=%s, heartbeat=%s (require_handshake=%s, ignore_version_mismatch=%s, enable_heartbeat=%s, strict_heartbeat=%s)",
+        "Mode selection: handshake=%s, heartbeat=%s (require_handshake=%s, ignore_version_mismatch=%s, strict_heartbeat=%s)",
         detail::handshake_mode_name(
             config::REQUIRE_HANDSHAKE,
             config::IGNORE_VERSION_MISMATCH),
-        detail::heartbeat_mode_name(enable_heartbeat_, strict_heartbeat_),
+        detail::heartbeat_mode_name(strict_heartbeat_),
         config::REQUIRE_HANDSHAKE ? "true" : "false",
         config::IGNORE_VERSION_MISMATCH ? "true" : "false",
-        enable_heartbeat_ ? "true" : "false",
         strict_heartbeat_ ? "true" : "false");
   }
 
@@ -262,6 +268,15 @@ namespace auto_serial_bridge
       publish_ready(true);
     }
     start_receive();
+
+    if constexpr (config::REQUIRE_HANDSHAKE)
+    {
+      // 连接建立后立即发送首个握手探测，不等心跳定时器 tick，
+      // 避免心跳间隔调大后拖慢重连恢复；后续探测仍由心跳定时器周期重发
+      Packet_Handshake handshake_probe;
+      handshake_probe.protocol_hash = PROTOCOL_HASH;
+      send_packet(PACKET_ID_HANDSHAKE, handshake_probe);
+    }
   }
 
   void SerialController::process_handshake(const Packet &pkt)
@@ -485,7 +500,7 @@ namespace auto_serial_bridge
       dispatch_payload.pop_back();
     }
 
-    if (pkt.id == PACKET_ID_HEARTBEAT && state_ == State::RUNNING && enable_heartbeat_)
+    if (pkt.id == PACKET_ID_HEARTBEAT && state_ == State::RUNNING)
     {
       if (pkt.payload.size() == sizeof(Packet_Heartbeat))
       {
@@ -605,7 +620,7 @@ namespace auto_serial_bridge
       }
     }
 
-    if (state_ != State::RUNNING || !enable_heartbeat_)
+    if (state_ != State::RUNNING)
     {
       return;
     }
@@ -615,30 +630,33 @@ namespace auto_serial_bridge
     {
       const auto elapsed = now - heartbeat_ack_wait_started_at_;
       const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-      if (elapsed_ms > heartbeat_timeout_ms_)
+      if (elapsed_ms <= heartbeat_timeout_ms_)
       {
-        if (strict_heartbeat_)
-        {
-          RCLCPP_WARN(
-              this->get_logger(),
-              "心跳确认超时 (%ld ms > %d ms)，MCU 可能已断连",
-              static_cast<long>(elapsed_ms), heartbeat_timeout_ms_);
-          reset_serial();
-          return;
-        }
-        else
-        {
-          RCLCPP_WARN_THROTTLE(
-              this->get_logger(), *this->get_clock(), 5000,
-              "心跳确认超时 (%ld ms > %d ms)，非严格模式，继续运行",
-              static_cast<long>(elapsed_ms), heartbeat_timeout_ms_);
-          // 非严格模式: 重置等待状态，允许发送下一次心跳
-          awaiting_heartbeat_ack_ = false;
-        }
+        // 超时窗口内每个 tick 重发同一 count（MCU 原样回包，重发的 ACK 仍可匹配）。
+        // 单个心跳帧或 ACK 帧丢失不再直接导致链路重置，只有整个窗口内
+        // 全部尝试失败才判定断连。
+        Packet_Heartbeat hb_retry;
+        hb_retry.count = last_heartbeat_tx_count_;
+        send_packet(PACKET_ID_HEARTBEAT, hb_retry);
+        return;
       }
 
-      // Keep a single outstanding heartbeat so delayed ACKs remain matchable.
-      return;
+      if (strict_heartbeat_)
+      {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "心跳确认超时 (%ld ms > %d ms)，MCU 可能已断连",
+            static_cast<long>(elapsed_ms), heartbeat_timeout_ms_);
+        reset_serial();
+        return;
+      }
+
+      RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *this->get_clock(), 5000,
+          "心跳确认超时 (%ld ms > %d ms)，非严格模式，继续运行",
+          static_cast<long>(elapsed_ms), heartbeat_timeout_ms_);
+      // 非严格模式: 重置等待状态，立即开始下一轮心跳
+      awaiting_heartbeat_ack_ = false;
     }
 
     Packet_Heartbeat hb_pkt;

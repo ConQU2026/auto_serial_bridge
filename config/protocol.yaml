@@ -16,9 +16,9 @@ config:
   checksum: "CRC8"              # NONE / SUM8 / XOR8 / CRC8
   require_handshake: true       # 打开串口后先校验协议哈希
   ignore_version_mismatch: false
-  enable_heartbeat: true        # 周期心跳检测连接
-  strict_heartbeat: true        # 心跳超时断开并自动重连
-  heartbeat_timeout_ms: 3000
+  strict_heartbeat: true        # 心跳超时断开并自动重连（心跳始终开启）
+  heartbeat_interval_ms: 1000   # 心跳发送间隔，由 ROS 端周期发起
+  heartbeat_timeout_ms: 3000    # 心跳确认超时，须 >= heartbeat_interval_ms
   reliable_retry_interval_ms: 100
   reliable_max_retries: 3
   qos_depth: 10

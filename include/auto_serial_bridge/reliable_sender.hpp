@@ -189,12 +189,11 @@ namespace auto_serial_bridge
         return;
       }
 
+      // 即使底层拒绝了本次发送（未连接、握手未完成被拦截等）也消耗一次重试，
+      // 保证 max_retries 上限语义成立；否则过期指令会在链路恢复后被无限延迟送达。
       std::vector<uint8_t> retry_payload = it->second.packed_bytes;
-      const bool send_accepted = send_callback_(retry_payload);
-      if (send_accepted)
-      {
-        it->second.retries_left--;
-      }
+      send_callback_(retry_payload);
+      it->second.retries_left--;
 
       if (pending_.find(key) != pending_.end())
       {

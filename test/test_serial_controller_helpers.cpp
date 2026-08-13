@@ -85,9 +85,8 @@ TEST(SerialControllerHelperTest, HandshakeModeNameSummarizesSelection)
 
 TEST(SerialControllerHelperTest, HeartbeatModeNameSummarizesSelection)
 {
-  EXPECT_STREQ(heartbeat_mode_name(false, true), "disabled");
-  EXPECT_STREQ(heartbeat_mode_name(true, true), "strict");
-  EXPECT_STREQ(heartbeat_mode_name(true, false), "warn_only");
+  EXPECT_STREQ(heartbeat_mode_name(true), "strict");
+  EXPECT_STREQ(heartbeat_mode_name(false), "warn_only");
 }
 
 TEST(SerialControllerHelperTest, RawTxFrameLoggingRequiresParameterAndDebugLogMode)

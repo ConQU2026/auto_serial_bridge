@@ -127,14 +127,8 @@ namespace auto_serial_bridge
       return ignore_version_mismatch ? "ignore_mismatch" : "strict";
     }
 
-    inline const char *heartbeat_mode_name(
-        bool enable_heartbeat,
-        bool strict_heartbeat)
+    inline const char *heartbeat_mode_name(bool strict_heartbeat)
     {
-      if (!enable_heartbeat)
-      {
-        return "disabled";
-      }
       return strict_heartbeat ? "strict" : "warn_only";
     }
 
@@ -240,6 +234,8 @@ namespace auto_serial_bridge
     bool tx_write_in_progress_ = false;
     size_t pending_serial_ops_ = 0;
     bool shutdown_requested_ = false;
+    // 析构开始后置位；post_serial 不再接受新任务，避免任务在成员析构期间执行
+    std::atomic<bool> shutting_down_{false};
     std::function<void()> pending_serial_drain_callback_;
 
     PacketHandler packet_handler_;
@@ -255,12 +251,11 @@ namespace auto_serial_bridge
     bool ready_published_ = false;
     bool ready_state_ = false;
 
-    // 心跳跟踪
+    // 心跳跟踪（心跳始终开启，由本节点周期发起）
     uint32_t heartbeat_count_ = 0;
     uint32_t last_heartbeat_tx_count_ = 0;
     std::chrono::steady_clock::time_point heartbeat_ack_wait_started_at_;
     bool awaiting_heartbeat_ack_ = false;
-    bool enable_heartbeat_ = true;
     bool strict_heartbeat_ = true;
     int heartbeat_timeout_ms_ = 3000;
 

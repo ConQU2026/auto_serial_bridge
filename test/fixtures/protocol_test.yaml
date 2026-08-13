@@ -11,8 +11,8 @@ config:
   checksum: "CRC8"
   require_handshake: true
   ignore_version_mismatch: false
-  enable_heartbeat: true
   strict_heartbeat: true
+  heartbeat_interval_ms: 1000
   heartbeat_timeout_ms: 3000
   reliable_retry_interval_ms: 100
   reliable_max_retries: 3

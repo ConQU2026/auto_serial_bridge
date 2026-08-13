@@ -215,30 +215,38 @@ def test_handshake_mcu_macro(require_hs, tmpdir):
     assert f"CFG_REQUIRE_HANDSHAKE {expected_val}" in content
 
 
-@pytest.mark.parametrize("enable_heartbeat", [True, False])
-def test_enable_heartbeat_cpp_config(enable_heartbeat, tmpdir):
+def test_enable_heartbeat_config_rejected(tmpdir):
     cfg = _load_sample_config()
-    cfg['config']['enable_heartbeat'] = enable_heartbeat
+    cfg['config']['enable_heartbeat'] = False
 
     result = _run_codegen(cfg, tmpdir)
-    assert result.returncode == 0
-
-    content = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_config.hpp')
-    expected_val = 'true' if enable_heartbeat else 'false'
-    assert f"ENABLE_HEARTBEAT = {expected_val}" in content
+    assert result.returncode != 0
+    assert 'enable_heartbeat is no longer supported' in result.stderr
 
 
-@pytest.mark.parametrize("enable_heartbeat", [True, False])
-def test_enable_heartbeat_mcu_macro(enable_heartbeat, tmpdir):
+@pytest.mark.parametrize("heartbeat_interval_ms", [200, 1000, 2000])
+def test_heartbeat_interval_config_propagates_to_generated_headers(heartbeat_interval_ms, tmpdir):
     cfg = _load_sample_config()
-    cfg['config']['enable_heartbeat'] = enable_heartbeat
+    cfg['config']['heartbeat_interval_ms'] = heartbeat_interval_ms
 
     result = _run_codegen(cfg, tmpdir)
-    assert result.returncode == 0
+    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
 
-    content = _read_generated(tmpdir, 'mcu_output/protocol.h')
-    expected_val = '1' if enable_heartbeat else '0'
-    assert f"CFG_ENABLE_HEARTBEAT {expected_val}" in content
+    header = _read_generated(tmpdir, 'mcu_output/protocol.h')
+    cpp_cfg = _read_generated(tmpdir, 'include/auto_serial_bridge/generated_config.hpp')
+
+    assert f"CFG_HEARTBEAT_INTERVAL_MS {heartbeat_interval_ms}" in header
+    assert f"constexpr int HEARTBEAT_INTERVAL_MS = {heartbeat_interval_ms};" in cpp_cfg
+
+
+def test_heartbeat_timeout_must_not_be_less_than_interval(tmpdir):
+    cfg = _load_sample_config()
+    cfg['config']['heartbeat_interval_ms'] = 2000
+    cfg['config']['heartbeat_timeout_ms'] = 1000
+
+    result = _run_codegen(cfg, tmpdir)
+    assert result.returncode != 0
+    assert 'heartbeat_timeout_ms' in result.stderr
 
 
 @pytest.mark.parametrize("strict_heartbeat", [True, False])
@@ -258,7 +266,7 @@ def test_strict_heartbeat_config_propagates_to_generated_headers(strict_heartbea
     assert f"constexpr bool STRICT_HEARTBEAT = {expected_const};" in cpp_cfg
 
 
-@pytest.mark.parametrize("heartbeat_timeout_ms", [1, 3000, 10000])
+@pytest.mark.parametrize("heartbeat_timeout_ms", [1000, 3000, 10000])
 def test_heartbeat_timeout_config_propagates_to_generated_headers(heartbeat_timeout_ms, tmpdir):
     cfg = _load_sample_config()
     cfg['config']['heartbeat_timeout_ms'] = heartbeat_timeout_ms
@@ -721,6 +729,7 @@ def test_protocol_hash_ignores_non_wire_configuration(tmpdir):
     config_b['serial_controller']['ros__parameters']['baudrate'] = 921600
     config_b['serial_controller']['ros__parameters']['debug_raw_frame'] = True
     config_b['config']['qos_depth'] = 42
+    config_b['config']['heartbeat_interval_ms'] = 500
     config_b['config']['heartbeat_timeout_ms'] = 9999
     config_b['config']['reliable_retry_interval_ms'] = 777
     config_b['messages'][0]['sub_topic'] = 'renamed/command'
@@ -802,37 +811,27 @@ def test_ignore_version_mismatch_config_propagates_to_generated_headers(ignore_v
     assert f"constexpr bool IGNORE_VERSION_MISMATCH = {expected_const};" in cpp_cfg
 
 
-def test_mcu_source_auto_replies_handshake_on_mismatch_when_ignore_enabled(tmpdir):
+@pytest.mark.parametrize("ignore_version_mismatch", [True, False])
+def test_mcu_fsm_auto_replies_handshake_with_local_hash(ignore_version_mismatch, tmpdir):
+    # 握手回应内置在 FSM 中且始终回传本机哈希，是否匹配由 ROS 端裁决，
+    # 与 ignore_version_mismatch 无关；用户钩子中不应再有回包逻辑。
     cfg = _load_sample_config()
     cfg['config']['require_handshake'] = True
-    cfg['config']['ignore_version_mismatch'] = True
+    cfg['config']['ignore_version_mismatch'] = ignore_version_mismatch
 
     result = _run_codegen(cfg, tmpdir)
     assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
 
     content = _read_generated(tmpdir, 'mcu_output/protocol.c')
-    body = _extract_function_body(content, 'on_receive_Handshake')
+    fsm_body = _extract_function_body(content, 'protocol_fsm_feed')
+    hook_body = _extract_function_body(content, 'on_receive_Handshake')
 
-    assert 'send_Handshake(pkt);' in body
-    assert 'if (pkt->protocol_hash == PROTOCOL_HASH)' not in body
-
-
-def test_mcu_source_requires_hash_match_when_ignore_disabled(tmpdir):
-    cfg = _load_sample_config()
-    cfg['config']['require_handshake'] = True
-    cfg['config']['ignore_version_mismatch'] = False
-
-    result = _run_codegen(cfg, tmpdir)
-    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
-
-    content = _read_generated(tmpdir, 'mcu_output/protocol.c')
-    body = _extract_function_body(content, 'on_receive_Handshake')
-
-    assert 'if (pkt->protocol_hash == PROTOCOL_HASH)' in body
-    assert 'send_Handshake(pkt);' in body
+    assert 'handshake_reply.protocol_hash = PROTOCOL_HASH;' in fsm_body
+    assert 'send_Handshake(&handshake_reply);' in fsm_body
+    assert 'send_Handshake' not in hook_body
 
 
-def test_mcu_source_does_not_auto_reply_handshake_when_disabled(tmpdir):
+def test_mcu_fsm_does_not_auto_reply_handshake_when_disabled(tmpdir):
     cfg = _load_sample_config()
     cfg['config']['require_handshake'] = False
 
@@ -840,33 +839,23 @@ def test_mcu_source_does_not_auto_reply_handshake_when_disabled(tmpdir):
     assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
 
     content = _read_generated(tmpdir, 'mcu_output/protocol.c')
-    body = _extract_function_body(content, 'on_receive_Handshake')
+    fsm_body = _extract_function_body(content, 'protocol_fsm_feed')
+    hook_body = _extract_function_body(content, 'on_receive_Handshake')
 
-    assert 'send_Handshake(pkt);' not in body
-    assert 'PROTOCOL_HASH' not in body
+    assert 'send_Handshake' not in fsm_body
+    assert 'send_Handshake' not in hook_body
 
 
-def test_mcu_source_auto_acks_heartbeat_when_enabled(tmpdir):
+def test_mcu_fsm_always_auto_acks_heartbeat(tmpdir):
+    # 心跳始终开启，回包内置在 FSM 中；用户钩子中不应再有回包逻辑。
     cfg = _load_sample_config()
-    cfg['config']['enable_heartbeat'] = True
 
     result = _run_codegen(cfg, tmpdir)
     assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
 
     content = _read_generated(tmpdir, 'mcu_output/protocol.c')
-    body = _extract_function_body(content, 'on_receive_Heartbeat')
+    fsm_body = _extract_function_body(content, 'protocol_fsm_feed')
+    hook_body = _extract_function_body(content, 'on_receive_Heartbeat')
 
-    assert 'send_Heartbeat(pkt);' in body
-
-
-def test_mcu_source_does_not_auto_ack_heartbeat_when_disabled(tmpdir):
-    cfg = _load_sample_config()
-    cfg['config']['enable_heartbeat'] = False
-
-    result = _run_codegen(cfg, tmpdir)
-    assert result.returncode == 0, f"codegen failed:\n{result.stdout}\n{result.stderr}"
-
-    content = _read_generated(tmpdir, 'mcu_output/protocol.c')
-    body = _extract_function_body(content, 'on_receive_Heartbeat')
-
-    assert 'send_Heartbeat(pkt);' not in body
+    assert 'send_Heartbeat((const Packet_Heartbeat*)rx_buffer);' in fsm_body
+    assert 'send_Heartbeat' not in hook_body

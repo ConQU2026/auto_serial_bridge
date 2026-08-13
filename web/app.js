@@ -18,6 +18,7 @@
     "reliable_retry_interval_ms",
     "reliable_max_retries",
     "qos_depth",
+    "heartbeat_interval_ms",
     "heartbeat_timeout_ms",
   ];
   const ROS_NUMERIC_KEYS = ["baudrate"];
@@ -62,9 +63,9 @@
       ignore_version_mismatch: false,
       reliable_retry_interval_ms: 100,
       reliable_max_retries: 3,
-      enable_heartbeat: true,
       strict_heartbeat: true,
       qos_depth: 10,
+      heartbeat_interval_ms: 1000,
       heartbeat_timeout_ms: 3000,
     },
     type_mappings: {
@@ -264,9 +265,13 @@
         config.reliable_max_retries,
         normalized.config.reliable_max_retries,
       ),
-      enable_heartbeat: normalizeBoolean(config.enable_heartbeat, normalized.config.enable_heartbeat),
+      // 旧版 protocol.yaml 可能包含 enable_heartbeat，导入时静默剔除（心跳始终开启）
       strict_heartbeat: normalizeBoolean(config.strict_heartbeat, normalized.config.strict_heartbeat),
       qos_depth: toInteger(config.qos_depth, normalized.config.qos_depth),
+      heartbeat_interval_ms: toInteger(
+        config.heartbeat_interval_ms,
+        normalized.config.heartbeat_interval_ms,
+      ),
       heartbeat_timeout_ms: toInteger(
         config.heartbeat_timeout_ms,
         normalized.config.heartbeat_timeout_ms,
@@ -335,11 +340,22 @@
       "reliable_retry_interval_ms",
       "reliable_max_retries",
       "qos_depth",
+      "heartbeat_interval_ms",
       "heartbeat_timeout_ms",
     ]) {
       if (!Number.isInteger(cfg[key]) || cfg[key] <= 0) {
         errors.push(`config.${key} 必须是正整数。`);
       }
+    }
+
+    if (
+      Number.isInteger(cfg.heartbeat_interval_ms) &&
+      Number.isInteger(cfg.heartbeat_timeout_ms) &&
+      cfg.heartbeat_interval_ms > 0 &&
+      cfg.heartbeat_timeout_ms > 0 &&
+      cfg.heartbeat_timeout_ms < cfg.heartbeat_interval_ms
+    ) {
+      errors.push("config.heartbeat_timeout_ms 必须 >= heartbeat_interval_ms。");
     }
 
     if (!normalizeString(protocol.serial_controller?.ros__parameters?.port).trim()) {
@@ -637,12 +653,12 @@
         { label: "帧头字节 2", path: "config.head_byte_2", type: "text", value: hexByte(config.head_byte_2) },
         { label: "校验方式", path: "config.checksum", type: "select", value: config.checksum, options: CHECKSUM_OPTIONS },
         { label: "QoS 深度", path: "config.qos_depth", type: "number", value: config.qos_depth },
+        { label: "心跳发送间隔 (ms)", path: "config.heartbeat_interval_ms", type: "number", value: config.heartbeat_interval_ms },
         { label: "心跳超时 (ms)", path: "config.heartbeat_timeout_ms", type: "number", value: config.heartbeat_timeout_ms },
         { label: "启用握手", path: "config.require_handshake", type: "checkbox", value: config.require_handshake },
         { label: "忽略协议版本不匹配", path: "config.ignore_version_mismatch", type: "checkbox", value: config.ignore_version_mismatch },
         { label: "可靠传输重试间隔 (ms)", path: "config.reliable_retry_interval_ms", type: "number", value: config.reliable_retry_interval_ms },
         { label: "可靠传输最大重试次数", path: "config.reliable_max_retries", type: "number", value: config.reliable_max_retries },
-        { label: "启用心跳", path: "config.enable_heartbeat", type: "checkbox", value: config.enable_heartbeat },
         { label: "严格心跳检测", path: "config.strict_heartbeat", type: "checkbox", value: config.strict_heartbeat },
       ];
 

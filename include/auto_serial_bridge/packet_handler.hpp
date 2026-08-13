@@ -283,17 +283,21 @@ namespace auto_serial_bridge
         continue;
       }
 
-      // 缓冲满且 drain 无效，reset 缓冲区以避免后续字节全部丢弃
+      handler.record_overflow();
+
+      // 缓冲满且 drain 无效，reset 缓冲区以避免后续字节全部丢弃。
+      // 缓冲区中的残留字节全部作废，如实计入丢弃数。
       if (!drained_any)
       {
+        dropped += handler.data_available();
         handler.reset();
       }
 
-      handler.record_overflow();
-      dropped++;
-
-      // reset 后重试当前字节
-      handler.try_push_byte(data[i]);
+      // reset 后重试当前字节；仍失败则该字节也计入丢弃
+      if (!handler.try_push_byte(data[i]))
+      {
+        dropped++;
+      }
     }
 
     while (handler.parse_packet(pkt))

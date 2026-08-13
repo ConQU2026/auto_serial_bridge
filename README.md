@@ -60,23 +60,29 @@ source install/setup.bash
 生成的下位机文件在：
 
 ```text
-install/auto_serial_bridge/share/auto_serial_bridge/mcu_output/          # 交付目录
-build/auto_serial_bridge/include/auto_serial_bridge/generated/           # 构建产物
+install/auto_serial_bridge/share/auto_serial_bridge/mcu_output/          # 交付目录（从这里复制）
+build/auto_serial_bridge/include/auto_serial_bridge/generated/           # 构建中间产物（勿直接使用）
 ```
+
+**从 `install` 下的 `mcu_output` 复制。** 两处内容在编译成功后一致，但
+`install` 是稳定的交付位置；`build` 是中间产物，`--cmake-clean-first`、
+`rm -rf build` 等操作会随时清掉它。
 
 集成步骤：
 
-1. 把 `protocol.h` 和 `protocol.c` 复制到 MCU 工程。
+1. 把 `install/.../mcu_output/` 里的 `protocol.h` 和 `protocol.c` 复制到 MCU 工程。
 2. 实现 `void serial_write(const uint8_t *data, uint16_t len)`，接到 UART 发送。
 3. 把 UART 收到的每个字节传给 `protocol_fsm_feed(uint8_t byte)`。
 4. 在 `on_receive_<Message>()` 回调中处理 ROS 发来的消息。
 5. 用 `send_<Message>()` 向 ROS 发送 `rx` / `both` 方向的消息。
 
-握手和心跳的 MCU 侧默认处理已自动生成，哈希匹配即自动回包。每次修改协议后
-需重新同步 MCU 文件，两端 `PROTOCOL_HASH` 必须一致。
+系统消息不需要写任何代码：握手回应、心跳回包、可靠消息 ACK 都内置在生成的
+协议状态机里，用户只实现自己业务消息的回调。每次修改协议后需重新同步 MCU
+文件，两端 `PROTOCOL_HASH` 必须一致。
 
-生成文件中的 `/* USER CODE BEGIN/END */` 区块在重新生成时会保留，但 `build`
-目录可能被清理，长期维护的业务代码应放在 MCU 工程里。
+生成文件中的 `/* USER CODE BEGIN/END */` 区块在重新生成时会保留，但该机制
+基于 `build` 目录中的旧文件，`build` 被清理后即丢失。长期维护的业务代码应
+放在 MCU 工程里，不要写进这两个生成文件。
 
 ### 5. 启动
 
@@ -108,9 +114,16 @@ local）：串口打开且握手完成为 `true`，断连、心跳超时或重�
 
 - `checksum`：`NONE` / `SUM8` / `XOR8` / `CRC8`。
 - `require_handshake`：打开串口后先校验协议哈希，通过才收发业务消息。
-- `enable_heartbeat` + `strict_heartbeat`：心跳超时（`heartbeat_timeout_ms`）
-  断开串口并自动重连。
+- 心跳始终开启：ROS 端每 `heartbeat_interval_ms` 发起一次心跳，MCU 端协议层
+  自动回包；未确认时在 `heartbeat_timeout_ms` 窗口内每个周期重发，单帧丢失
+  不会误判断连。整个窗口都未确认时，`strict_heartbeat: true`（默认，生产
+  环境建议保持）断开串口并自动重连；`false` 只告警不重连，仅建议调试时使用
+  （链路停滞时发送队列会持续堆积）。要求 `heartbeat_timeout_ms >=
+  heartbeat_interval_ms`。
 - `reliable_retry_interval_ms` / `reliable_max_retries`：可靠消息的重传参数。
+  重试耗尽即丢弃并报错（默认 100ms × 3 次）。断连重连期间发布的可靠消息同样
+  受此上限约束：关键指令应在 `auto_serial_bridge/ready` 为 `true` 时再发，
+  或按可容忍的断连时长调大重试参数。
 - `buffer_size`：接收缓冲区，须能容纳最大完整帧。
 
 字段类型支持 `uint8_t`、`uint16_t`、`uint32_t`、`int32_t`、`float`（32 位
@@ -122,13 +135,15 @@ IEEE-754，两端须为小端序）。payload 最大 255 字节，可靠消息�
 
 ### 协议哈希
 
-哈希覆盖线协议契约：帧头、校验算法、握手/心跳开关、消息 ID、方向、reliable
+哈希覆盖线协议契约：帧头、校验算法、握手开关、消息 ID、方向、reliable
 标志和字段 C 类型（按 ID 排序，与 YAML 书写顺序无关）。串口路径、波特率、
-话题名、QoS、日志和 notes 不参与哈希。
+话题名、QoS、心跳间隔/超时、日志和 notes 不参与哈希。
 
-## 串口权限（可选）
+## 串口权限与固定设备名（生产部署建议）
 
-用脚本生成固定的 udev 设备别名：
+USB 设备重新插拔后可能被内核重新枚举（如 `/dev/ttyACM0` 变成 `ttyACM1`），
+导致按固定路径配置的 `port` 重连失败。生产部署建议用脚本生成固定的 udev
+设备别名，并把 `port` 指向别名：
 
 ```bash
 sudo ./scripts/auto_udev.sh

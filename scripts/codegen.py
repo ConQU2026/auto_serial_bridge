@@ -173,7 +173,6 @@ def _protocol_hash_input(config_data):
         'head_byte_2': cfg['head_byte_2'],
         'checksum': str(cfg.get('checksum', 'CRC8')).upper(),
         'require_handshake': bool(cfg.get('require_handshake', True)),
-        'enable_heartbeat': bool(cfg.get('enable_heartbeat', True)),
         'messages': messages,
     }
 
@@ -246,8 +245,8 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
     checksum_algo = str(config.get('checksum', 'CRC8')).upper()
     require_handshake = config.get('require_handshake', True)
     ignore_version_mismatch = config.get('ignore_version_mismatch', False)
-    enable_heartbeat = config.get('enable_heartbeat', True)
     strict_heartbeat = config.get('strict_heartbeat', True)
+    heartbeat_interval_ms = config.get('heartbeat_interval_ms', 1000)
     heartbeat_timeout_ms = config.get('heartbeat_timeout_ms', 3000)
     reliable_retry_interval_ms = config.get('reliable_retry_interval_ms', 100)
     reliable_max_retries = config.get('reliable_max_retries', 3)
@@ -274,9 +273,9 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
         f.write(f"#define CFG_IGNORE_VERSION_MISMATCH {1 if ignore_version_mismatch else 0}\n")
         f.write("\n")
 
-        f.write("// 心跳配置\n")
-        f.write(f"#define CFG_ENABLE_HEARTBEAT {1 if enable_heartbeat else 0}\n")
+        f.write("// 心跳配置（心跳始终开启，由 ROS 端周期发起，MCU 端由协议层自动回包）\n")
         f.write(f"#define CFG_STRICT_HEARTBEAT {1 if strict_heartbeat else 0}\n")
+        f.write(f"#define CFG_HEARTBEAT_INTERVAL_MS {heartbeat_interval_ms}\n")
         f.write(f"#define CFG_HEARTBEAT_TIMEOUT_MS {heartbeat_timeout_ms}\n")
         f.write("\n")
 
@@ -327,11 +326,13 @@ def generate_mcu_header(config, messages, type_mappings, protocol_hash, output_p
 
 
 def generate_mcu_source(config, messages, type_mappings, output_path, user_blocks):
-    """生成 MCU 端 C 源文件。"""
+    """生成 MCU 端 C 源文件。
+
+    系统消息（Heartbeat 回包、Handshake 回应、reliable ACK）由协议层 FSM
+    自动处理，用户回调只是可选的观察钩子，覆盖它们不会破坏协议行为。
+    """
     checksum_algo = str(config.get('checksum', 'CRC8')).upper()
     require_handshake = config.get('require_handshake', True)
-    ignore_version_mismatch = config.get('ignore_version_mismatch', False)
-    enable_heartbeat = config.get('enable_heartbeat', True)
 
     # rx_buffer 仅暂存当前正在解析的单个包 payload。reliable 包会追加 1 字节 seq。
     max_struct_payload = max(message_payload_size(msg, type_mappings) for msg in messages)
@@ -422,24 +423,13 @@ uint8_t calculate_checksum(const uint8_t* data, size_t len) {
         f.write(render_block(user_blocks, "Private_Variables"))
         f.write("\n")
 
-        f.write("\n// 用户需要实现的回调函数\n")
+        f.write("\n// 用户可选实现的回调钩子。\n")
+        f.write("// 系统消息 (Ack/Heartbeat/Handshake) 的协议行为已由 FSM 内置，\n")
+        f.write("// 覆盖这些钩子只用于观察，不需要也不应该在其中回包。\n")
         for msg in messages:
             func_name = f"on_receive_{msg['name']}"
             f.write(f"__attribute__((weak)) void {func_name}(const Packet_{msg['name']}* pkt) {{\n")
             f.write("    (void)pkt;\n")
-            if msg['name'] == 'Handshake' and require_handshake:
-                if ignore_version_mismatch:
-                    f.write("    // Default system behavior: keep handshake flow even when protocol hash differs.\n")
-                    f.write("    send_Handshake(pkt);\n")
-                else:
-                    f.write("    // Default system behavior: ack matching protocol hash automatically.\n")
-                    f.write("    if (pkt->protocol_hash == PROTOCOL_HASH) {\n")
-                    f.write("        send_Handshake(pkt);\n")
-                    f.write("    }\n")
-            if msg['name'] == 'Heartbeat' and enable_heartbeat:
-                f.write("    // Default system behavior: ack the latest heartbeat with the same count.\n")
-                f.write("    send_Heartbeat(pkt);\n")
-            # ACK 已由协议层 FSM 自动发送，回调中无需处理
             f.write(render_block(user_blocks, func_name))
             f.write("}\n")
 
@@ -519,6 +509,16 @@ void protocol_fsm_feed(uint8_t byte) {{
                 f.write("                        }\n")
             else:
                 f.write(f"                        if (rx_data_len == sizeof(Packet_{msg['name']})) {{\n")
+                if msg['name'] == 'Heartbeat':
+                    f.write("                            // 框架内置：原样回传心跳包作为 ACK\n")
+                    f.write("                            send_Heartbeat((const Packet_Heartbeat*)rx_buffer);\n")
+                if msg['name'] == 'Handshake' and require_handshake:
+                    f.write("                            // 框架内置：回传本机协议哈希，由 ROS 端校验是否匹配\n")
+                    f.write("                            {\n")
+                    f.write("                                Packet_Handshake handshake_reply;\n")
+                    f.write("                                handshake_reply.protocol_hash = PROTOCOL_HASH;\n")
+                    f.write("                                send_Handshake(&handshake_reply);\n")
+                    f.write("                            }\n")
                 f.write(f"                            on_receive_{msg['name']}((Packet_{msg['name']}*)rx_buffer);\n")
                 f.write("                        }\n")
             f.write("                        break;\n")
@@ -540,6 +540,9 @@ void protocol_fsm_feed(uint8_t byte) {{
 
         f.write("\n// --- 发送函数 ---\n")
         f.write("// 外部依赖：用户必须实现 void serial_write(const uint8_t* data, uint16_t len);\n")
+        f.write("// 注意：协议层会在 protocol_fsm_feed() 的调用上下文中发送回包（心跳/握手/ACK）。\n")
+        f.write("// 若 protocol_fsm_feed() 在中断中调用，而业务代码也在主循环调用 send_xxx()，\n")
+        f.write("// 则 serial_write() 必须自行保证可重入/并发安全（如关中断或使用发送队列）。\n")
         f.write("extern void serial_write(const uint8_t* data, uint16_t len);\n\n")
 
         for msg in messages:
@@ -563,15 +566,9 @@ void protocol_fsm_feed(uint8_t byte) {{
 
         f.write("\n")
         f.write(render_block(user_blocks, "Code_1"))
-
-        f.write("\n/*\n// --- 建议的消息发送模板 (以 Heartbeat 为例) ---\n")
-        f.write("// 建议在定时器回调或主循环中以固定频率调用\n\n")
-        f.write("void heartbeat_timer_callback(void) {\n")
-        f.write("    static uint32_t hb_count = 0;\n")
-        f.write("    Packet_Heartbeat pkt;\n")
-        f.write("    pkt.count = hb_count++;\n")
-        f.write("    send_Heartbeat(&pkt);\n")
-        f.write("}\n*/\n")
+        f.write("\n")
+        f.write("// 心跳由 ROS 端周期发起 (间隔 CFG_HEARTBEAT_INTERVAL_MS)，\n")
+        f.write("// 协议层收到后自动原样回包，MCU 侧无需主动发送心跳。\n")
         f.write("\n")
 
         write_generated_file(output_path, f.getvalue())
@@ -890,8 +887,8 @@ def generate_cpp_config(config, messages, type_mappings, output_path, serial_par
     require_handshake = config.get('require_handshake', True)
     ignore_version_mismatch = config.get('ignore_version_mismatch', False)
     qos_depth = config.get('qos_depth', 10)
+    heartbeat_interval_ms = config.get('heartbeat_interval_ms', 1000)
     heartbeat_timeout_ms = config.get('heartbeat_timeout_ms', 3000)
-    enable_heartbeat = config.get('enable_heartbeat', True)
     strict_heartbeat = config.get('strict_heartbeat', True)
     reliable_retry_interval_ms = config.get('reliable_retry_interval_ms', 100)
     reliable_max_retries = config.get('reliable_max_retries', 3)
@@ -925,9 +922,9 @@ def generate_cpp_config(config, messages, type_mappings, output_path, serial_par
 
         f.write(f"    constexpr bool REQUIRE_HANDSHAKE = {'true' if require_handshake else 'false'};\n")
         f.write(f"    constexpr bool IGNORE_VERSION_MISMATCH = {'true' if ignore_version_mismatch else 'false'};\n")
-        f.write(f"    constexpr bool ENABLE_HEARTBEAT = {'true' if enable_heartbeat else 'false'};\n")
         f.write(f"    constexpr bool STRICT_HEARTBEAT = {'true' if strict_heartbeat else 'false'};\n")
         f.write(f"    constexpr size_t QOS_DEPTH = {qos_depth};\n")
+        f.write(f"    constexpr int HEARTBEAT_INTERVAL_MS = {heartbeat_interval_ms};\n")
         f.write(f"    constexpr int HEARTBEAT_TIMEOUT_MS = {heartbeat_timeout_ms};\n")
         f.write(f"    constexpr int RELIABLE_RETRY_INTERVAL_MS = {reliable_retry_interval_ms};\n")
         f.write(f"    constexpr int RELIABLE_MAX_RETRIES = {reliable_max_retries};\n")
@@ -1017,8 +1014,6 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
     baudrate = serial_params.get('baudrate', 115200)
     checksum = str(config.get('checksum', 'CRC8')).upper()
     require_handshake = config.get('require_handshake', True)
-    ignore_version_mismatch = config.get('ignore_version_mismatch', False)
-    enable_heartbeat = config.get('enable_heartbeat', True)
 
     _CHECKSUM_DESC = {
         "NONE": "无校验（占位字节 `0x00`）",
@@ -1043,6 +1038,7 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
         f.write("---\n\n")
 
         strict_heartbeat = config.get('strict_heartbeat', True)
+        heartbeat_interval_ms = config.get('heartbeat_interval_ms', 1000)
         heartbeat_timeout_ms = config.get('heartbeat_timeout_ms', 3000)
         reliable_retry_interval_ms = config.get('reliable_retry_interval_ms', 100)
         reliable_max_retries = config.get('reliable_max_retries', 3)
@@ -1057,6 +1053,7 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
         f.write(f"| 强制握手 | `{'是' if require_handshake else '否'}` |\n")
         f.write(f"| 协议哈希（握手用）| `0x{protocol_hash:08X}` |\n")
         f.write(f"| 严格心跳模式 | `{'是' if strict_heartbeat else '否'}` |\n")
+        f.write(f"| 心跳发送间隔（ROS 端发起）| `{heartbeat_interval_ms} ms` |\n")
         f.write(f"| 心跳超时时间 | `{heartbeat_timeout_ms} ms` |\n")
         f.write(f"| 可靠传输重试间隔 | `{reliable_retry_interval_ms} ms` |\n")
         f.write(f"| 可靠传输最大重试 | `{reliable_max_retries} 次` |\n")
@@ -1075,6 +1072,14 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
         f.write(f"| 4+Len | Checksum | {checksum_desc} |\n")
         f.write("\n---\n\n")
 
+        f.write("## MCU 集成注意事项\n\n")
+        f.write("- 系统消息无需编写代码：心跳回包、握手回应、可靠消息 ACK 均由生成的协议状态机自动完成。\n")
+        f.write("- 协议层会在 `protocol_fsm_feed()` 的调用上下文中发送回包。若 `protocol_fsm_feed()` "
+                "在串口中断中调用，而业务代码在主循环中调用 `send_xxx()`，"
+                "`serial_write()` 必须自行保证可重入/并发安全（如关中断保护或发送队列）。\n")
+        f.write("- 心跳由 ROS 端周期发起并在超时窗口内重发同一 `count`，MCU 侧对重复心跳原样回包即可（自动完成）。\n")
+        f.write("\n---\n\n")
+
         f.write("## 电控 → ROS（电控主动发送）\n\n")
         if rx_msgs:
             for msg in rx_msgs:
@@ -1085,10 +1090,7 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
                 if msg.get('notes'):
                     f.write(f"- **注意事项**：{msg['notes']}\n")
                 if msg['name'] == 'Handshake' and require_handshake:
-                    if ignore_version_mismatch:
-                        f.write("- **默认生成行为**：`on_receive_Handshake()` 无条件回传握手包（`ignore_version_mismatch=true`）。\n")
-                    else:
-                        f.write("- **默认生成行为**：`on_receive_Handshake()` 在收到匹配 `PROTOCOL_HASH` 的握手包后会自动调用 `send_Handshake(pkt)` 回包。\n")
+                    f.write("- **内置行为**：协议层收到握手包后自动回传本机 `PROTOCOL_HASH`，是否匹配由 ROS 端校验，MCU 侧无需编写代码。\n")
                 f.write("\n")
                 f.write(_field_table(msg['fields'], type_mappings, checksum))
                 f.write("\n\n")
@@ -1108,12 +1110,9 @@ def generate_mcu_doc(config: dict, messages: list, type_mappings: dict,
                 if msg.get('notes'):
                     f.write(f"- **注意事项**：{msg['notes']}\n")
                 if msg['name'] == 'Handshake' and require_handshake:
-                    if ignore_version_mismatch:
-                        f.write("- **默认生成行为**：`on_receive_Handshake()` 无条件回传握手包（`ignore_version_mismatch=true`）。\n")
-                    else:
-                        f.write("- **默认生成行为**：`on_receive_Handshake()` 在收到匹配 `PROTOCOL_HASH` 的握手包后会自动调用 `send_Handshake(pkt)` 回包。\n")
-                if msg['name'] == 'Heartbeat' and enable_heartbeat:
-                    f.write("- **默认生成行为**：`on_receive_Heartbeat()` 会自动调用 `send_Heartbeat(pkt)`，按原样回同一个 `count` 作为 ACK。\n")
+                    f.write("- **内置行为**：协议层收到握手包后自动回传本机 `PROTOCOL_HASH`，是否匹配由 ROS 端校验，MCU 侧无需编写代码。\n")
+                if msg['name'] == 'Heartbeat':
+                    f.write(f"- **内置行为**：ROS 端每 `{heartbeat_interval_ms} ms` 发起一次心跳，协议层自动按原样回传同一个 `count` 作为 ACK，MCU 侧无需编写代码。\n")
                 if reliable:
                     f.write("- **可靠投递**：该消息启用 ACK/重传。ROS 端会在业务结构体 payload 后透明追加 1 字节 reliable seq；"
                             "该字节参与 `Len` 和校验，但不属于 `Packet_xxx` 业务结构体字段。生成的分发逻辑会先自动 `send_Ack()`，再调用 `on_receive_xxx()`。\n")
@@ -1198,11 +1197,18 @@ def validate_protocol(config_data):
     if not isinstance(buffer_size, int) or isinstance(buffer_size, bool) or buffer_size <= 0:
         errors.append("config.buffer_size must be a positive integer.")
 
-    for key in ('require_handshake', 'ignore_version_mismatch', 'enable_heartbeat', 'strict_heartbeat'):
+    if 'enable_heartbeat' in cfg:
+        errors.append(
+            "config.enable_heartbeat is no longer supported; heartbeat is always enabled. "
+            "Tune heartbeat_interval_ms / heartbeat_timeout_ms / strict_heartbeat instead."
+        )
+
+    for key in ('require_handshake', 'ignore_version_mismatch', 'strict_heartbeat'):
         if not isinstance(cfg.get(key, True), bool):
             errors.append(f"config.{key} must be boolean.")
 
     for key, default in (
+        ('heartbeat_interval_ms', 1000),
         ('heartbeat_timeout_ms', 3000),
         ('reliable_retry_interval_ms', 100),
         ('reliable_max_retries', 3),
@@ -1211,6 +1217,19 @@ def validate_protocol(config_data):
         value = cfg.get(key, default)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             errors.append(f"config.{key} must be a positive integer.")
+
+    heartbeat_interval = cfg.get('heartbeat_interval_ms', 1000)
+    heartbeat_timeout = cfg.get('heartbeat_timeout_ms', 3000)
+    if (
+        isinstance(heartbeat_interval, int) and not isinstance(heartbeat_interval, bool)
+        and isinstance(heartbeat_timeout, int) and not isinstance(heartbeat_timeout, bool)
+        and heartbeat_interval > 0 and heartbeat_timeout > 0
+        and heartbeat_timeout < heartbeat_interval
+    ):
+        errors.append(
+            f"config.heartbeat_timeout_ms={heartbeat_timeout} must be >= "
+            f"heartbeat_interval_ms={heartbeat_interval}."
+        )
 
     VALID_DIRECTIONS = {"tx", "rx", "both"}
     VALID_DEBUG_LOG_MODES = {"on", "off"}
