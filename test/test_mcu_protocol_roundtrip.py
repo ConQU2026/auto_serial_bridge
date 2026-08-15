@@ -10,7 +10,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CODEGEN_SCRIPT = REPO_ROOT / "scripts" / "codegen.py"
-SAMPLE_CONFIG = REPO_ROOT / "config" / "protocol.yaml"
+SAMPLE_CONFIG = REPO_ROOT / "test" / "fixtures" / "protocol_test.yaml"
 HARNESS_SOURCE = REPO_ROOT / "test" / "test_mcu_main.c"
 
 
