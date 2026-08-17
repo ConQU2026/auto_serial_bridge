@@ -3,7 +3,6 @@
 #include <sstream>
 
 #include "auto_serial_bridge/generated/generated_config.hpp"
-#include "auto_serial_bridge/loopback_utils.hpp"
 #include "auto_serial_bridge/serial_controller.hpp"
 #include "rclcpp_components/register_node_macro.hpp"
 
@@ -20,7 +19,6 @@ namespace auto_serial_bridge
         state_(config::REQUIRE_HANDSHAKE ? State::WAITING_HANDSHAKE : State::RUNNING),
         ctx_(std::make_shared<drivers::common::IoContext>(2)),
         packet_handler_(auto_serial_bridge::config::BUFFER_SIZE),
-        enable_heartbeat_(config::ENABLE_HEARTBEAT),
         strict_heartbeat_(config::STRICT_HEARTBEAT),
         heartbeat_timeout_ms_(static_cast<int>(config::HEARTBEAT_TIMEOUT_MS))
   {
@@ -30,22 +28,19 @@ namespace auto_serial_bridge
     reliable_sender_ = std::make_shared<ReliableSender>(
         ctx_->ios(),
         *serial_strand_,
-        [this](const std::vector<uint8_t> &packet_bytes)
+        [this](
+            const std::vector<uint8_t> &packet_bytes,
+            ReliableSender::SendCompletion completion)
         {
-          const bool sent = async_send_impl(packet_bytes);
-          if (sent)
-          {
-            tx_packet_count_++;
-          }
-          return sent;
+          async_send_impl(packet_bytes, std::move(completion));
         },
-        [this](PacketID id, int max_retries)
+        [this](PacketID id, int retry_threshold)
         {
-          RCLCPP_ERROR(
+          RCLCPP_WARN(
               this->get_logger(),
-              "Reliable send failed for packet id=0x%02X after %d retries",
+              "Reliable packet id=0x%02X is still awaiting ACK after another %d retries",
               static_cast<unsigned int>(id),
-              max_retries);
+              retry_threshold);
         },
         std::chrono::milliseconds(config::RELIABLE_RETRY_INTERVAL_MS),
         config::RELIABLE_MAX_RETRIES);
@@ -65,7 +60,7 @@ namespace auto_serial_bridge
         std::bind(&SerialController::check_connection, this));
 
     heartbeat_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(1000),
+        std::chrono::milliseconds(config::HEARTBEAT_INTERVAL_MS),
         [this]()
         {
           post_serial([this]()
@@ -78,6 +73,10 @@ namespace auto_serial_bridge
   {
     heartbeat_timer_.reset();
     timer_.reset();
+    // 先停掉 ROS 侧入口再排空串口操作：置位后 post_serial 不再受理新任务，
+    // 防止订阅回调等在排空完成后仍向 strand 投递捕获 this 的任务
+    subscriptions_.clear();
+    shutting_down_.store(true, std::memory_order_release);
 
     if (serial_strand_ && !serial_strand_->running_in_this_thread())
     {
@@ -103,41 +102,12 @@ namespace auto_serial_bridge
     reset_serial();
   }
 
-  void SerialController::register_loopback_publisher(
-      PacketID id,
-      const std::shared_ptr<rclcpp::PublisherBase> &publisher)
-  {
-    std::lock_guard<std::mutex> lock(loopback_publishers_mutex_);
-    loopback_publishers_[static_cast<uint8_t>(id)] = publisher;
-  }
-
-  bool SerialController::should_skip_loopback(
-      PacketID id,
-      const rclcpp::MessageInfo &info) const
-  {
-    std::shared_ptr<rclcpp::PublisherBase> publisher;
-    {
-      std::lock_guard<std::mutex> lock(loopback_publishers_mutex_);
-      const auto it = loopback_publishers_.find(static_cast<uint8_t>(id));
-      if (it == loopback_publishers_.end())
-      {
-        return false;
-      }
-      publisher = it->second.lock();
-    }
-
-    if (!publisher)
-    {
-      return false;
-    }
-
-    const auto &rmw_info = info.get_rmw_message_info();
-    return should_skip_loopback_delivery(
-        publisher->get_gid(), rmw_info.publisher_gid, rmw_info.from_intra_process);
-  }
-
   void SerialController::post_serial(std::function<void()> task)
   {
+    if (shutting_down_.load(std::memory_order_acquire))
+    {
+      return;
+    }
     if (!serial_strand_)
     {
       task();
@@ -160,23 +130,22 @@ namespace auto_serial_bridge
 
     RCLCPP_INFO(
         this->get_logger(),
-        "Port: %s, Baudrate: %u, DebugRawFrame: %s, EnableHeartbeat: %s, StrictHeartbeat: %s, HeartbeatTimeout: %dms",
+        "Port: %s, Baudrate: %u, DebugRawFrame: %s, StrictHeartbeat: %s, HeartbeatInterval: %dms, HeartbeatTimeout: %dms",
         port_.c_str(),
         baudrate_,
         debug_raw_frame_ ? "true" : "false",
-        enable_heartbeat_ ? "true" : "false",
         strict_heartbeat_ ? "true" : "false",
+        static_cast<int>(config::HEARTBEAT_INTERVAL_MS),
         heartbeat_timeout_ms_);
     RCLCPP_DEBUG(
         this->get_logger(),
-        "Mode selection: handshake=%s, heartbeat=%s (require_handshake=%s, ignore_version_mismatch=%s, enable_heartbeat=%s, strict_heartbeat=%s)",
+        "Mode selection: handshake=%s, heartbeat=%s (require_handshake=%s, ignore_version_mismatch=%s, strict_heartbeat=%s)",
         detail::handshake_mode_name(
             config::REQUIRE_HANDSHAKE,
             config::IGNORE_VERSION_MISMATCH),
-        detail::heartbeat_mode_name(enable_heartbeat_, strict_heartbeat_),
+        detail::heartbeat_mode_name(strict_heartbeat_),
         config::REQUIRE_HANDSHAKE ? "true" : "false",
         config::IGNORE_VERSION_MISMATCH ? "true" : "false",
-        enable_heartbeat_ ? "true" : "false",
         strict_heartbeat_ ? "true" : "false");
   }
 
@@ -191,11 +160,6 @@ namespace auto_serial_bridge
     ready_publisher_->publish(message);
     ready_state_ = ready;
     ready_published_ = true;
-  }
-
-  bool SerialController::try_open_serial()
-  {
-    return try_open_serial_impl();
   }
 
   bool SerialController::try_open_serial_impl()
@@ -233,11 +197,19 @@ namespace auto_serial_bridge
     ++connection_generation_;
     shutdown_requested_ = true;
 
-    if (reliable_sender_)
+    if (reliable_sender_ && shutting_down_.load(std::memory_order_acquire))
     {
       reliable_sender_->clear_all();
     }
 
+    for (auto &request : tx_queue_)
+    {
+      if (request->completion)
+      {
+        auto completion = std::move(request->completion);
+        completion(false);
+      }
+    }
     tx_queue_.clear();
     tx_write_in_progress_ = false;
 
@@ -257,7 +229,6 @@ namespace auto_serial_bridge
     heartbeat_count_ = 0;
     last_heartbeat_tx_count_ = 0;
     awaiting_heartbeat_ack_ = false;
-    heartbeat_ack_received_ = false;
 
     if (pending_serial_ops_ == 0 && pending_serial_drain_callback_)
     {
@@ -302,6 +273,15 @@ namespace auto_serial_bridge
       publish_ready(true);
     }
     start_receive();
+
+    if constexpr (config::REQUIRE_HANDSHAKE)
+    {
+      // 连接建立后立即发送首个握手探测，不等心跳定时器 tick，
+      // 避免心跳间隔调大后拖慢重连恢复；后续探测仍由心跳定时器周期重发
+      Packet_Handshake handshake_probe;
+      handshake_probe.protocol_hash = PROTOCOL_HASH;
+      send_packet(PACKET_ID_HANDSHAKE, handshake_probe);
+    }
   }
 
   void SerialController::process_handshake(const Packet &pkt)
@@ -318,13 +298,13 @@ namespace auto_serial_bridge
       return;
     }
 
-    const auto *data = reinterpret_cast<const Packet_Handshake *>(pkt.payload.data());
+    const auto data = pkt.as<Packet_Handshake>();
     const std::string hash_pair = detail::format_hash_pair(
         PROTOCOL_HASH,
-        data->protocol_hash);
+        data.protocol_hash);
     const auto validation = detail::classify_handshake_validation(
         PROTOCOL_HASH,
-        data->protocol_hash,
+        data.protocol_hash,
         config::IGNORE_VERSION_MISMATCH);
 
     const auto enter_running_state = [this]()
@@ -333,8 +313,6 @@ namespace auto_serial_bridge
       heartbeat_count_ = 0;
       last_heartbeat_tx_count_ = 0;
       awaiting_heartbeat_ack_ = false;
-      heartbeat_ack_received_ = false;
-      last_heartbeat_ack_time_ = std::chrono::steady_clock::now();
       publish_ready(true);
     };
 
@@ -389,18 +367,17 @@ namespace auto_serial_bridge
     }
 
     const auto generation = connection_generation_;
-    auto buffer = std::make_shared<std::array<uint8_t, 2048>>();
     ++pending_serial_ops_;
     try
     {
       port->async_read_some(
-          asio::buffer(*buffer),
+          asio::buffer(rx_buffer_),
           serial_strand_->wrap(
-              [this, port, generation, buffer](
+              [this, port, generation](
                   const asio::error_code &error,
                   const size_t bytes_read)
               {
-                handle_receive(port, generation, buffer, error, bytes_read);
+                handle_receive(port, generation, error, bytes_read);
               }));
     }
     catch (const std::exception &e)
@@ -460,7 +437,6 @@ namespace auto_serial_bridge
   void SerialController::handle_receive(
       const std::shared_ptr<asio::serial_port> &port,
       uint64_t generation,
-      const std::shared_ptr<std::array<uint8_t, 2048>> &buffer,
       const asio::error_code &error,
       size_t bytes_read)
   {
@@ -504,7 +480,7 @@ namespace auto_serial_bridge
       return;
     }
 
-    const size_t dropped = ingest_received_bytes(buffer->data(), bytes_read);
+    const size_t dropped = ingest_received_bytes(rx_buffer_.data(), bytes_read);
     if (dropped > 0)
     {
       RCLCPP_WARN_THROTTLE(
@@ -529,36 +505,22 @@ namespace auto_serial_bridge
       dispatch_payload.pop_back();
     }
 
-    if (pkt.id == PACKET_ID_HEARTBEAT && state_ == State::RUNNING && enable_heartbeat_)
+    if (pkt.id == PACKET_ID_HEARTBEAT && state_ == State::RUNNING)
     {
       if (pkt.payload.size() == sizeof(Packet_Heartbeat))
       {
-        const auto *data = reinterpret_cast<const Packet_Heartbeat *>(pkt.payload.data());
-        if (awaiting_heartbeat_ack_ && data->count == last_heartbeat_tx_count_)
+        const auto data = pkt.as<Packet_Heartbeat>();
+        if (data.count == last_heartbeat_tx_count_)
         {
+          // 正常 ACK 或迟到的 ACK（非严格模式超时重置后才回传），都视为有效
           awaiting_heartbeat_ack_ = false;
-          heartbeat_ack_received_ = true;
-          last_heartbeat_ack_time_ = std::chrono::steady_clock::now();
           if (should_log_protocol_debug(PACKET_ID_HEARTBEAT))
           {
             RCLCPP_DEBUG(
                 this->get_logger(),
                 "Heartbeat ACK matched: count=%u, state=%s",
-                data->count,
+                data.count,
                 state_name());
-          }
-        }
-        else if (data->count == last_heartbeat_tx_count_)
-        {
-          // 迟到的 ACK: MCU 在超时重置后才回传，计数匹配，视为有效，更新确认时间
-          heartbeat_ack_received_ = true;
-          last_heartbeat_ack_time_ = std::chrono::steady_clock::now();
-          if (should_log_protocol_debug(PACKET_ID_HEARTBEAT))
-          {
-            RCLCPP_DEBUG_THROTTLE(
-                this->get_logger(), *this->get_clock(), 2000,
-                "Heartbeat late ACK (awaiting already reset): count=%u",
-                data->count);
           }
         }
         else
@@ -569,7 +531,7 @@ namespace auto_serial_bridge
               this->get_logger(), *this->get_clock(), 2000,
               "心跳计数不匹配: expected=%u, got=%u, state=%s, payload=[%s]",
               last_heartbeat_tx_count_,
-              data->count,
+              data.count,
               state_name(),
               payload_hex.c_str());
         }
@@ -592,8 +554,8 @@ namespace auto_serial_bridge
     {
       if (pkt.payload.size() == sizeof(Packet_Ack))
       {
-        const auto *data = reinterpret_cast<const Packet_Ack *>(pkt.payload.data());
-        reliable_sender_->on_ack_received(data->acked_id, data->ack_seq);
+        const auto data = pkt.as<Packet_Ack>();
+        reliable_sender_->on_ack_received(data.acked_id, data.ack_seq);
       }
       else
       {
@@ -663,7 +625,7 @@ namespace auto_serial_bridge
       }
     }
 
-    if (state_ != State::RUNNING || !enable_heartbeat_)
+    if (state_ != State::RUNNING)
     {
       return;
     }
@@ -673,30 +635,33 @@ namespace auto_serial_bridge
     {
       const auto elapsed = now - heartbeat_ack_wait_started_at_;
       const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-      if (elapsed_ms > heartbeat_timeout_ms_)
+      if (elapsed_ms <= heartbeat_timeout_ms_)
       {
-        if (strict_heartbeat_)
-        {
-          RCLCPP_WARN(
-              this->get_logger(),
-              "心跳确认超时 (%ld ms > %d ms)，MCU 可能已断连",
-              static_cast<long>(elapsed_ms), heartbeat_timeout_ms_);
-          reset_serial();
-          return;
-        }
-        else
-        {
-          RCLCPP_WARN_THROTTLE(
-              this->get_logger(), *this->get_clock(), 5000,
-              "心跳确认超时 (%ld ms > %d ms)，非严格模式，继续运行",
-              static_cast<long>(elapsed_ms), heartbeat_timeout_ms_);
-          // 非严格模式: 重置等待状态，允许发送下一次心跳
-          awaiting_heartbeat_ack_ = false;
-        }
+        // 超时窗口内每个 tick 重发同一 count（MCU 原样回包，重发的 ACK 仍可匹配）。
+        // 单个心跳帧或 ACK 帧丢失不再直接导致链路重置，只有整个窗口内
+        // 全部尝试失败才判定断连。
+        Packet_Heartbeat hb_retry;
+        hb_retry.count = last_heartbeat_tx_count_;
+        send_packet(PACKET_ID_HEARTBEAT, hb_retry);
+        return;
       }
 
-      // Keep a single outstanding heartbeat so delayed ACKs remain matchable.
-      return;
+      if (strict_heartbeat_)
+      {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "心跳确认超时 (%ld ms > %d ms)，MCU 可能已断连",
+            static_cast<long>(elapsed_ms), heartbeat_timeout_ms_);
+        reset_serial();
+        return;
+      }
+
+      RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *this->get_clock(), 5000,
+          "心跳确认超时 (%ld ms > %d ms)，非严格模式，继续运行",
+          static_cast<long>(elapsed_ms), heartbeat_timeout_ms_);
+      // 非严格模式: 重置等待状态，立即开始下一轮心跳
+      awaiting_heartbeat_ack_ = false;
     }
 
     Packet_Heartbeat hb_pkt;
@@ -707,14 +672,11 @@ namespace auto_serial_bridge
     send_packet(PACKET_ID_HEARTBEAT, hb_pkt);
   }
 
-  void SerialController::async_send(const std::vector<uint8_t> &packet_bytes)
+  void SerialController::async_send(std::vector<uint8_t> packet_bytes)
   {
-    post_serial([this, packet_bytes]()
+    post_serial([this, packet_bytes = std::move(packet_bytes)]() mutable
                 {
-                  if (async_send_impl(packet_bytes))
-                  {
-                    tx_packet_count_++;
-                  }
+                  async_send_impl(std::move(packet_bytes));
                 });
   }
 
@@ -793,16 +755,20 @@ namespace auto_serial_bridge
         describe_protocol_packet(id, payload).c_str());
   }
 
-  bool SerialController::async_send_impl(const std::vector<uint8_t> &packet_bytes)
+  void SerialController::async_send_impl(
+      std::vector<uint8_t> packet_bytes,
+      std::function<void(bool)> completion)
   {
     if (!is_connected_ || !serial_port_)
     {
-      return false;
+      if (completion) completion(false);
+      return;
     }
 
     if (!serial_port_->is_open())
     {
-      return false;
+      if (completion) completion(false);
+      return;
     }
 
     if constexpr (config::REQUIRE_HANDSHAKE)
@@ -821,25 +787,47 @@ namespace auto_serial_bridge
                 static_cast<unsigned int>(id_byte),
                 state_name());
           }
-          return false;
+          if (completion) completion(false);
+          return;
         }
       }
     }
 
+    if (tx_queue_.size() >= MAX_TX_QUEUE_SIZE)
+    {
+      RCLCPP_ERROR_THROTTLE(
+          this->get_logger(), *this->get_clock(), 2000,
+          "Serial TX queue is full (%zu frames); rejecting packet",
+          MAX_TX_QUEUE_SIZE);
+      if (completion) completion(false);
+      return;
+    }
+
+    std::shared_ptr<TxRequest> request;
     try
     {
       log_mcu_tx(packet_bytes);
-      tx_queue_.push_back(std::make_shared<std::vector<uint8_t>>(packet_bytes));
+      request = std::make_shared<TxRequest>();
+      request->bytes = std::move(packet_bytes);
+      request->completion = std::move(completion);
+      tx_queue_.push_back(request);
       start_next_write();
     }
     catch (const std::exception &e)
     {
       RCLCPP_ERROR(this->get_logger(), "Send error: %s", e.what());
+      if (request && request->completion)
+      {
+        auto request_completion = std::move(request->completion);
+        request_completion(false);
+      }
+      else if (completion)
+      {
+        completion(false);
+      }
       reset_serial();
-      return false;
+      return;
     }
-
-    return true;
   }
 
   void SerialController::start_next_write()
@@ -851,6 +839,14 @@ namespace auto_serial_bridge
 
     if (!is_connected_ || !serial_port_ || !serial_port_->is_open())
     {
+      for (auto &request : tx_queue_)
+      {
+        if (request->completion)
+        {
+          auto completion = std::move(request->completion);
+          completion(false);
+        }
+      }
       tx_queue_.clear();
       tx_write_in_progress_ = false;
       return;
@@ -858,7 +854,7 @@ namespace auto_serial_bridge
 
     const auto port = serial_port_;
     const auto generation = connection_generation_;
-    const auto packet_bytes = tx_queue_.front();
+    const auto request = tx_queue_.front();
     tx_write_in_progress_ = true;
     ++pending_serial_ops_;
 
@@ -866,20 +862,19 @@ namespace auto_serial_bridge
     {
       asio::async_write(
           *port,
-          asio::buffer(*packet_bytes),
+          asio::buffer(request->bytes),
           serial_strand_->wrap(
-              [this, port, generation, packet_bytes](
+              [this, port, generation, request](
                   const asio::error_code &error,
                   const size_t bytes_transferred)
               {
-                handle_write(port, generation, packet_bytes, error, bytes_transferred);
+                handle_write(port, generation, request, error, bytes_transferred);
               }));
     }
     catch (const std::exception &e)
     {
       complete_serial_op();
       tx_write_in_progress_ = false;
-      tx_queue_.clear();
       RCLCPP_ERROR(
           this->get_logger(),
           "Failed to start serial write on '%s': %s",
@@ -892,7 +887,7 @@ namespace auto_serial_bridge
   void SerialController::handle_write(
       const std::shared_ptr<asio::serial_port> &port,
       uint64_t generation,
-      const std::shared_ptr<std::vector<uint8_t>> &packet_bytes,
+      const std::shared_ptr<TxRequest> &request,
       const asio::error_code &error,
       size_t)
   {
@@ -904,9 +899,20 @@ namespace auto_serial_bridge
     }
 
     tx_write_in_progress_ = false;
-    if (!tx_queue_.empty() && tx_queue_.front() == packet_bytes)
+    if (!tx_queue_.empty() && tx_queue_.front() == request)
     {
       tx_queue_.pop_front();
+    }
+
+    if (request->completion)
+    {
+      auto completion = std::move(request->completion);
+      completion(!error);
+    }
+
+    if (!error)
+    {
+      tx_packet_count_++;
     }
 
     if (error)

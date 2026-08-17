@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <unordered_map>
@@ -22,22 +23,23 @@ namespace auto_serial_bridge
   class ReliableSender : public std::enable_shared_from_this<ReliableSender>
   {
   public:
-    using SendCallback = std::function<bool(const std::vector<uint8_t> &)>;
-    using ExhaustedCallback = std::function<void(PacketID id, int max_retries)>;
+    using SendCompletion = std::function<void(bool)>;
+    using SendCallback = std::function<void(const std::vector<uint8_t> &, SendCompletion)>;
+    using RetryThresholdCallback = std::function<void(PacketID id, int retry_threshold)>;
 
     ReliableSender(
         asio::io_service &io_service,
         asio::io_service::strand &strand,
         SendCallback send_callback,
-        ExhaustedCallback exhausted_callback,
+        RetryThresholdCallback retry_threshold_callback,
         std::chrono::milliseconds retry_interval,
-        int max_retries)
+        int retry_warning_threshold)
         : io_service_(io_service),
           strand_(strand),
           send_callback_(std::move(send_callback)),
-          exhausted_callback_(std::move(exhausted_callback)),
+          retry_threshold_callback_(std::move(retry_threshold_callback)),
           retry_interval_(retry_interval),
-          max_retries_(max_retries)
+          retry_warning_threshold_(retry_warning_threshold)
     {
     }
 
@@ -64,11 +66,7 @@ namespace auto_serial_bridge
     void clear_all()
     {
       auto self = shared_from_this();
-      run_or_post(
-          [self]()
-          {
-            self->clear_all_impl();
-          });
+      run_or_post([self]() { self->clear_all_impl(); });
     }
 
   private:
@@ -76,8 +74,12 @@ namespace auto_serial_bridge
     {
       PacketID id;
       std::vector<uint8_t> packed_bytes;
-      int retries_left;
-      uint8_t expected_seq;
+      uint8_t expected_seq = 0;
+      bool seq_assigned = false;
+      uint64_t send_generation = 0;
+      int retries_since_warning = 0;
+      bool send_in_progress = false;
+      bool awaiting_ack = false;
       std::shared_ptr<asio::steady_timer> timer;
     };
 
@@ -92,18 +94,14 @@ namespace auto_serial_bridge
       strand_.post(std::forward<Fn>(fn));
     }
 
-    /// 在已打包帧的 payload 末尾注入 1 字节 seq，并更新 LEN 和校验和。
     static void inject_trailing_seq(std::vector<uint8_t> &frame, uint8_t seq)
     {
       if (frame.size() < 5)
       {
         return;
       }
-      // LEN 字段加 1
       frame[3]++;
-      // 在校验和（末字节）之前插入 seq
       frame.insert(frame.end() - 1, seq);
-      // 重新计算校验和（覆盖 ID + LEN + PAYLOAD + seq）
       frame.back() = PacketHandler::calculate_checksum(
           frame.data() + 2, frame.size() - 3);
     }
@@ -111,47 +109,99 @@ namespace auto_serial_bridge
     void send_impl(PacketID id, std::vector<uint8_t> packed_bytes)
     {
       const uint8_t key = static_cast<uint8_t>(id);
-      auto it = pending_.find(key);
-      if (it != pending_.end())
-      {
-        it->second.timer->cancel();
-        pending_.erase(it);
-      }
-
-      const uint8_t seq = seq_counter_++;
-      inject_trailing_seq(packed_bytes, seq);
-
       PendingEntry entry;
       entry.id = id;
       entry.packed_bytes = std::move(packed_bytes);
-      entry.retries_left = max_retries_;
-      entry.expected_seq = seq;
       entry.timer = std::make_shared<asio::steady_timer>(io_service_);
 
-      auto inserted = pending_.emplace(key, std::move(entry));
-      const auto &first_send = inserted.first->second.packed_bytes;
-      send_callback_(first_send);
-
-      if (pending_.find(key) != pending_.end())
+      auto &queue = pending_[key];
+      queue.push_back(std::move(entry));
+      if (queue.size() == 1)
       {
-        schedule_retry(key);
+        attempt_send(key);
       }
+    }
+
+    void attempt_send(uint8_t key)
+    {
+      auto it = pending_.find(key);
+      if (it == pending_.end() || it->second.empty())
+      {
+        return;
+      }
+
+      auto &entry = it->second.front();
+      if (entry.send_in_progress)
+      {
+        return;
+      }
+
+      if (!entry.seq_assigned)
+      {
+        entry.expected_seq = seq_counter_++;
+        inject_trailing_seq(entry.packed_bytes, entry.expected_seq);
+        entry.seq_assigned = true;
+      }
+
+      entry.send_in_progress = true;
+      const uint8_t seq = entry.expected_seq;
+      const uint64_t generation = ++entry.send_generation;
+      std::weak_ptr<ReliableSender> weak_self = weak_from_this();
+      send_callback_(
+          entry.packed_bytes,
+          [weak_self, key, seq, generation](bool success)
+          {
+            auto self = weak_self.lock();
+            if (!self)
+            {
+              return;
+            }
+            self->run_or_post(
+                [self, key, seq, generation, success]()
+                {
+                  self->handle_send_completion(key, seq, generation, success);
+                });
+          });
+    }
+
+    void handle_send_completion(
+        uint8_t key,
+        uint8_t seq,
+        uint64_t generation,
+        bool success)
+    {
+      auto it = pending_.find(key);
+      if (it == pending_.end() || it->second.empty())
+      {
+        return;
+      }
+
+      auto &entry = it->second.front();
+      if (entry.expected_seq != seq || entry.send_generation != generation)
+      {
+        return;
+      }
+
+      entry.send_in_progress = false;
+      entry.awaiting_ack = success;
+      schedule_retry(key);
     }
 
     void schedule_retry(uint8_t key)
     {
       auto it = pending_.find(key);
-      if (it == pending_.end())
+      if (it == pending_.end() || it->second.empty())
       {
         return;
       }
 
-      auto timer = it->second.timer;
+      auto timer = it->second.front().timer;
+      const uint8_t seq = it->second.front().expected_seq;
       timer->expires_from_now(retry_interval_);
 
       std::weak_ptr<ReliableSender> weak_self = weak_from_this();
       timer->async_wait(
-          [weak_self, key](const asio::error_code &ec)
+          [weak_self, key, seq](const asio::error_code &ec)
           {
             if (ec == asio::error::operation_aborted)
             {
@@ -163,66 +213,69 @@ namespace auto_serial_bridge
               return;
             }
             self->run_or_post(
-                [self, key]()
-                {
-                  self->handle_retry_timeout(key);
-                });
+                [self, key, seq]() { self->handle_retry_timeout(key, seq); });
           });
     }
 
-    void handle_retry_timeout(uint8_t key)
+    void handle_retry_timeout(uint8_t key, uint8_t seq)
     {
       auto it = pending_.find(key);
-      if (it == pending_.end())
+      if (it == pending_.end() || it->second.empty())
       {
         return;
       }
 
-      if (it->second.retries_left <= 0)
+      auto &entry = it->second.front();
+      if (entry.expected_seq != seq)
       {
-        if (exhausted_callback_)
+        return;
+      }
+
+      entry.awaiting_ack = false;
+      ++entry.retries_since_warning;
+      if (retry_warning_threshold_ > 0 &&
+          entry.retries_since_warning >= retry_warning_threshold_)
+      {
+        entry.retries_since_warning = 0;
+        if (retry_threshold_callback_)
         {
-          exhausted_callback_(it->second.id, max_retries_);
+          retry_threshold_callback_(entry.id, retry_warning_threshold_);
         }
-        it->second.timer->cancel();
-        pending_.erase(it);
-        return;
       }
-
-      std::vector<uint8_t> retry_payload = it->second.packed_bytes;
-      const bool send_accepted = send_callback_(retry_payload);
-      if (send_accepted)
-      {
-        it->second.retries_left--;
-      }
-
-      if (pending_.find(key) != pending_.end())
-      {
-        schedule_retry(key);
-      }
+      attempt_send(key);
     }
 
     void on_ack_received_impl(uint8_t acked_id, uint8_t ack_seq)
     {
       auto it = pending_.find(acked_id);
-      if (it == pending_.end())
+      if (it == pending_.end() || it->second.empty())
       {
         return;
       }
-      // 序列号不匹配则忽略（过期 ACK）
-      if (it->second.expected_seq != ack_seq)
+      if (it->second.front().expected_seq != ack_seq ||
+          !it->second.front().awaiting_ack)
       {
         return;
       }
-      it->second.timer->cancel();
-      pending_.erase(it);
+
+      it->second.front().timer->cancel();
+      it->second.pop_front();
+      if (it->second.empty())
+      {
+        pending_.erase(it);
+        return;
+      }
+      attempt_send(acked_id);
     }
 
     void clear_all_impl()
     {
       for (auto &kv : pending_)
       {
-        kv.second.timer->cancel();
+        for (auto &entry : kv.second)
+        {
+          entry.timer->cancel();
+        }
       }
       pending_.clear();
     }
@@ -230,11 +283,11 @@ namespace auto_serial_bridge
     asio::io_service &io_service_;
     asio::io_service::strand &strand_;
     SendCallback send_callback_;
-    ExhaustedCallback exhausted_callback_;
+    RetryThresholdCallback retry_threshold_callback_;
     std::chrono::milliseconds retry_interval_;
-    int max_retries_;
+    int retry_warning_threshold_;
     uint8_t seq_counter_ = 0;
-    std::unordered_map<uint8_t, PendingEntry> pending_;
+    std::unordered_map<uint8_t, std::deque<PendingEntry>> pending_;
   };
 
 } // namespace auto_serial_bridge

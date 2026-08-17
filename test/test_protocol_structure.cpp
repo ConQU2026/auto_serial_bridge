@@ -25,10 +25,10 @@ TEST(ProtocolStructureTest, Constants) {
 TEST(ProtocolStructureTest, CRCTableCheck) {
     // 抽查标准 CRC8-MAXIM 多项式 (0x31) 的几个值
     // 0 -> 0x00
-    EXPECT_EQ(CRC8_TABLE[0], 0x00);
+    EXPECT_EQ(auto_serial_bridge::config::CRC8_TABLE[0], 0x00);
     // 1 -> 0x31
-    EXPECT_EQ(CRC8_TABLE[1], 0x31);
+    EXPECT_EQ(auto_serial_bridge::config::CRC8_TABLE[1], 0x31);
     // 255 -> 0xAC
-    EXPECT_EQ(CRC8_TABLE[255], 0xAC); 
+    EXPECT_EQ(auto_serial_bridge::config::CRC8_TABLE[255], 0xAC); 
 }
 #endif

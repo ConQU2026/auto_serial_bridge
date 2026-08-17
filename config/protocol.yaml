@@ -1,29 +1,29 @@
-# ROS 2 节点参数。修改此文件后，必须重新编译本包。
-# 必须保留 serial_controller、config、type_mappings 和 messages 这四个部分。
-# 下方标有“必留”的配置会被代码生成器直接使用；删除后会导致协议生成失败
-# 或节点无法正常启动。涉及线协议的值只能在 ROS 与 MCU 两端同步修改。
+# auto_serial_bridge 协议配置。修改后需重新 colcon build 才会生效。
+#
+# 系统消息 Ack(0xFD)、Heartbeat(0xFE)、Handshake(0xFF) 由框架内置，
+# 不需要也不允许写在这里；messages 里只写你自己的业务消息。
+
 serial_controller:
   ros__parameters:
-    port: "/dev/ttyACM0"       # 必留：串口设备路径；可通过 launch 参数覆盖
-    baudrate: 115200            # 必留：本文件中唯一的波特率配置
-    debug_raw_frame: false
+    port: "/dev/ttyACM0"        # 串口设备路径，可用 launch 参数 port:= 覆盖
+    baudrate: 115200            # 波特率，可用 launch 参数 baudrate:= 覆盖
+    debug_raw_frame: false      # 配合 debug 日志输出原始收发帧
 
 config:
-  buffer_size: 1024             # 必留：必须能够容纳最大完整帧
-  head_byte_1: 0x5A             # 必留：线协议参数，必须与 MCU 保持一致
-  head_byte_2: 0xA5             # 必留：线协议参数，必须与 MCU 保持一致
-  checksum: "CRC8"              # 必留：可选 NONE、SUM8、XOR8 或 CRC8
-  require_handshake: true        # 必留：控制框架握手功能
-  ignore_version_mismatch: false # 必留：为保证协议安全，建议保持 false
-  enable_heartbeat: true         # 必留：控制框架心跳功能
-  strict_heartbeat: true         # 必留：启用后，心跳超时会断开连接
-  heartbeat_timeout_ms: 3000
+  buffer_size: 1024             # 接收缓冲区，须能容纳最大完整帧
+  head_byte_1: 0x5A             # 帧头字节，两端必须一致
+  head_byte_2: 0xA5
+  checksum: "CRC8"              # NONE / SUM8 / XOR8 / CRC8
+  require_handshake: true       # 打开串口后先校验协议哈希
+  ignore_version_mismatch: false
+  strict_heartbeat: true        # 心跳超时断开并自动重连（心跳始终开启）
+  heartbeat_interval_ms: 1000   # 心跳发送间隔，由 ROS 端周期发起
+  heartbeat_timeout_ms: 3000    # 心跳确认超时，须 >= heartbeat_interval_ms
   reliable_retry_interval_ms: 100
-  reliable_max_retries: 3
+  reliable_max_retries: 3       # 未收到 ACK 时每累计此次数输出告警；仍会继续重试
   qos_depth: 10
 
-# 必须保留此类型映射。下方使用的每种字段类型都必须映射为代码生成器支持的
-# 定长 C 类型。可以按需增加别名，但不能删除仍被消息字段使用的别名。
+# 字段类型别名 -> 定长 C 类型。支持 uint8_t/uint16_t/uint32_t/int32_t/float。
 type_mappings:
   f32: "float"
   i32: "int32_t"
@@ -31,76 +31,40 @@ type_mappings:
   u16: "uint16_t"
   u32: "uint32_t"
 
-# 必须保留 messages 列表。Ack、Heartbeat 和 Handshake 是框架必需的系统消息：
-# 不得删除、重命名、调整字段顺序或修改 ID 与方向；普通消息不得占用系统保留的
-# 0xFD 至 0xFF。其他示例消息可以根据实际协议替换。
-messages:
-
-#===========================================================================
-  - name: "Ack"
-    id: 0xFD
-    direction: "both"
-    debug_log_mode: "off"
-    sub_topic: "auto_serial_bridge/system/ack"
-    pub_topic: "auto_serial_bridge/system/ack"
-    ros_msg: "std_msgs/msg/Int32MultiArray"
-    notes: "Framework ACK. Do not change this system message."
-    fields:
-      - { proto: "acked_id", type: "u8", ros: "data[0]" }
-      - { proto: "ack_seq", type: "u8", ros: "data[1]" }
-
-  - name: "Heartbeat"
-    id: 0xFE
-    direction: "both"
-    debug_log_mode: "off"
-    sub_topic: "auto_serial_bridge/system/heartbeat"
-    pub_topic: "auto_serial_bridge/system/heartbeat"
-    ros_msg: "std_msgs/msg/UInt32"
-    notes: "Framework heartbeat. The peer returns the same count."
-    fields:
-      - { proto: "count", type: "u32", ros: "data" }
-
-  - name: "Handshake"
-    id: 0xFF
-    direction: "both"
-    debug_log_mode: "off"
-    sub_topic: "auto_serial_bridge/system/handshake"
-    pub_topic: "auto_serial_bridge/system/handshake"
-    ros_msg: "std_msgs/msg/UInt32"
-    notes: "Framework handshake carrying the protocol hash."
-    fields:
-      - { proto: "protocol_hash", type: "u32", ros: "data" }
-
-#===========================================================================
-# 以下三个业务消息仅作为配置示例，默认不参与代码生成和协议哈希。
-# 需要试用时，取消整个消息块每一行开头的注释；正式项目可直接删除并替换。
-#  - name: "DemoCommand"
-#    id: 0x01
-#    direction: "tx"
-#    debug_log_mode: "on"
-#    sub_topic: "demo/command"
-#    ros_msg: "std_msgs/msg/UInt32"
-#    notes: "Neutral best-effort ROS-to-MCU example."
-#    fields:
-#      - { proto: "value", type: "u32", ros: "data" }
+# 业务消息列表。字段说明：
+#   name       消息名（合法 C 标识符，生成 Packet_<name>）
+#   id         0x00-0xFC 唯一消息 ID（0xFD-0xFF 为框架保留）
+#   direction  tx = ROS->MCU，rx = MCU->ROS，both = 双向
+#   reliable   true 时启用 ACK + 超时重传（仅支持 tx）
+#   sub_topic / pub_topic  对应方向的 ROS 话题（相对话题，不带前导 /）
+#   ros_msg    ROS 消息类型，形如 package/msg/Type
+#   fields     按线协议顺序：{ proto: 协议字段名, type: 类型, ros: ROS 字段路径 }
 #
-#  - name: "DemoReliableCommand"
-#    id: 0x02
-#    direction: "tx"
-#    reliable: true
-#    debug_log_mode: "on"
-#    sub_topic: "demo/reliable_command"
-#    ros_msg: "std_msgs/msg/UInt32"
-#    notes: "Neutral reliable ROS-to-MCU example."
-#    fields:
-#      - { proto: "value", type: "u32", ros: "data" }
+# 下面是三条示例，替换成你自己的消息即可：
+messages: []
+
+# messages:
+#   - name: "DemoCommand"
+#     id: 0x01
+#     direction: "tx"
+#     sub_topic: "demo/command"
+#     ros_msg: "std_msgs/msg/UInt32"
+#     fields:
+#       - { proto: "value", type: "u32", ros: "data" }
 #
-#  - name: "DemoTelemetry"
-#    id: 0x03
-#    direction: "rx"
-#    debug_log_mode: "on"
-#    pub_topic: "demo/telemetry"
-#    ros_msg: "std_msgs/msg/Float32"
-#    notes: "Neutral MCU-to-ROS telemetry example."
-#    fields:
-#      - { proto: "value", type: "f32", ros: "data" }
+#   - name: "DemoReliableCommand"
+#     id: 0x02
+#     direction: "tx"
+#     reliable: true
+#     sub_topic: "demo/reliable_command"
+#     ros_msg: "std_msgs/msg/UInt32"
+#     fields:
+#       - { proto: "value", type: "u32", ros: "data" }
+#
+#   - name: "DemoTelemetry"
+#     id: 0x03
+#     direction: "rx"
+#     pub_topic: "demo/telemetry"
+#     ros_msg: "std_msgs/msg/Float32"
+#     fields:
+#       - { proto: "value", type: "f32", ros: "data" }

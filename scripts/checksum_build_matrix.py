@@ -106,18 +106,17 @@ def run_checksum_build_matrix() -> list[dict]:
                     "-DBUILD_TESTING=ON",
                 ],
                 cwd=temp_root / "src",
-                extra_env={
-                    "CMAKE_BUILD_PARALLEL_LEVEL": "1",
-                    "MAKEFLAGS": "-j1",
-                },
             )
 
             package_build_dir = build_base / "auto_serial_bridge"
+            ctest_cmd = [
+                "ctest", "--output-on-failure", "--no-tests=error", "-R", GTEST_REGEX,
+            ]
             ctest = _run(
-                ["ctest", "--output-on-failure", "-R", GTEST_REGEX],
+                ctest_cmd,
                 cwd=package_build_dir,
             ) if build.returncode == 0 else subprocess.CompletedProcess(
-                args=["ctest", "--output-on-failure", "-R", GTEST_REGEX],
+                args=ctest_cmd,
                 returncode=1,
                 stdout="",
                 stderr="skipped because build failed",

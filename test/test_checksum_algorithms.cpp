@@ -29,7 +29,7 @@ uint8_t ref_xor8(const uint8_t* data, size_t len) {
 #ifdef CHECKSUM_ALGO_CRC8
 uint8_t ref_crc8(const uint8_t* data, size_t len) {
     uint8_t crc = 0;
-    for (size_t i = 0; i < len; ++i) crc = CRC8_TABLE[crc ^ data[i]];
+    for (size_t i = 0; i < len; ++i) crc = config::CRC8_TABLE[crc ^ data[i]];
     return crc;
 }
 #endif
@@ -113,14 +113,14 @@ TEST(ChecksumAlgoTest, CRC8_KnownVectors) {
 }
 
 TEST(ChecksumAlgoTest, CRC8_TableSanity) {
-    EXPECT_EQ(CRC8_TABLE[0], 0x00);
-    EXPECT_EQ(CRC8_TABLE[1], 0x31);
-    EXPECT_EQ(CRC8_TABLE[255], 0xAC);
+    EXPECT_EQ(config::CRC8_TABLE[0], 0x00);
+    EXPECT_EQ(config::CRC8_TABLE[1], 0x31);
+    EXPECT_EQ(config::CRC8_TABLE[255], 0xAC);
 
     // 表中 256 个值互不完全为 0
     int nonzero = 0;
     for (int i = 0; i < 256; ++i)
-        if (CRC8_TABLE[i] != 0) ++nonzero;
+        if (config::CRC8_TABLE[i] != 0) ++nonzero;
     EXPECT_GT(nonzero, 200);
 }
 #endif

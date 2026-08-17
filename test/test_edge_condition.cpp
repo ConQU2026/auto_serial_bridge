@@ -275,21 +275,18 @@ TEST_F(EdgeCaseTest, FalseHeaderSequence) {
 
 // 9. 缓冲区溢出 / 覆盖
 TEST_F(EdgeCaseTest, BufferOverflow) {
-    // 假设缓冲区大小为 4096。
-    // 投喂 5000 字节的垃圾数据。
-    std::vector<uint8_t> heavy_load(5000, 0xFF);
-    handler.feed_data(heavy_load);
-    
-    // 然后投喂一个有效数据包
+    // 环形缓冲实际容量会向上取整为 2 的幂, 不依赖具体数值,
+    // 投喂远超构造大小的垃圾数据并确认确实发生了溢出丢弃。
+    std::vector<uint8_t> heavy_load(16384, 0xFF);
+    const size_t dropped_noise = handler.feed_data(heavy_load);
+    ASSERT_GT(dropped_noise, 0u);
+
+    // 缓冲已满后投喂有效数据包: 当前实现丢弃新数据 (不覆盖旧数据)。
     auto pkt = handler.pack(PACKET_ID_HEARTBEAT, Packet_Heartbeat{1});
-    handler.feed_data(pkt);
-    
+    EXPECT_EQ(handler.feed_data(pkt), pkt.size());
+
     Packet out;
-    // 取决于具体实现:
-    // 情况 A (丢弃新数据): 你将找不到该数据包。
-    // 情况 B (覆盖旧数据): 你将找到该数据包 (因为它在末尾)。
-    
-    // 当前实现在溢出时丢弃新数据。
+    // 缓冲区内只有垃圾字节, 有效包已被整体丢弃, 解析不出任何包。
     EXPECT_FALSE(handler.parse_packet(out));
 }
 

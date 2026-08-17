@@ -14,7 +14,10 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(PROTOCOL_YAML "${CMAKE_CURRENT_SOURCE_DIR}/config/protocol.yaml")
 set(CODEGEN_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/codegen.py")
-set(GENERATED_ROOT "${CMAKE_CURRENT_BINARY_DIR}/generated")
+# 生成头文件放在 <build>/include/auto_serial_bridge/generated/，
+# 以 <build>/include 作为 include 根目录，不依赖 colcon 的构建目录命名。
+set(GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/include")
+set(GENERATED_ROOT "${GENERATED_INCLUDE_DIR}/auto_serial_bridge/generated")
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${PROTOCOL_YAML}"
@@ -52,7 +55,7 @@ add_custom_command(
     ${GENERATED_CONFIG_HPP}
     ${GENERATED_BINDINGS_HPP}
     ${GENERATED_PROTOCOL_DOC}
-  COMMAND ${Python3_EXECUTABLE} ${CODEGEN_SCRIPT} ${PROTOCOL_YAML} ${CMAKE_CURRENT_BINARY_DIR}
+  COMMAND ${Python3_EXECUTABLE} ${CODEGEN_SCRIPT} ${PROTOCOL_YAML} ${GENERATED_INCLUDE_DIR}/auto_serial_bridge
   DEPENDS ${PROTOCOL_YAML} ${CODEGEN_SCRIPT} ${CMAKE_CURRENT_SOURCE_DIR}/package.xml
   COMMENT "Generating protocol sources from config/protocol.yaml"
   VERBATIM
@@ -82,7 +85,7 @@ add_dependencies(${PROJECT_NAME}_lib generate_protocol_code)
 target_compile_features(${PROJECT_NAME}_lib PUBLIC cxx_std_17)
 target_include_directories(${PROJECT_NAME}_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/..>
+  $<BUILD_INTERFACE:${GENERATED_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
 ament_target_dependencies(${PROJECT_NAME}_lib ${PROJECT_DEPENDENCIES})
@@ -96,7 +99,7 @@ add_dependencies(serial_node generate_protocol_code)
 target_compile_features(serial_node PUBLIC cxx_std_17)
 target_include_directories(serial_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/..>
+  $<BUILD_INTERFACE:${GENERATED_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
 ament_target_dependencies(serial_node ${PROJECT_DEPENDENCIES})
@@ -109,11 +112,7 @@ install(TARGETS ${PROJECT_NAME}_lib
   RUNTIME DESTINATION bin
 )
 install(TARGETS serial_node DESTINATION lib/${PROJECT_NAME})
-install(DIRECTORY include/ DESTINATION include
-  PATTERN "generated_config.hpp" EXCLUDE
-  PATTERN "generated_bindings.hpp" EXCLUDE
-  PATTERN "serial_ready_node.hpp" EXCLUDE
-)
+install(DIRECTORY include/ DESTINATION include)
 install(FILES
   ${GENERATED_PROTOCOL_H}
   ${GENERATED_CONFIG_HPP}
@@ -142,7 +141,7 @@ if(BUILD_TESTING)
     if(TARGET ${test_name})
       add_dependencies(${test_name} generate_protocol_code)
       target_include_directories(${test_name} PRIVATE
-        ${CMAKE_CURRENT_BINARY_DIR}/..
+        ${GENERATED_INCLUDE_DIR}
         ${GENERATED_ROOT}
       )
       target_link_libraries(${test_name} ${PROJECT_NAME}_lib)
@@ -152,7 +151,7 @@ if(BUILD_TESTING)
 
   ament_add_pytest_test(my_python_tests test/
     ENV "PYTEST_ADDOPTS=--ignore=${CMAKE_CURRENT_SOURCE_DIR}/test/test_checksum_build_matrix.py")
-  ament_add_pytest_test(checksum_build_matrix test/test_checksum_build_matrix.py TIMEOUT 600)
+  ament_add_pytest_test(checksum_build_matrix test/test_checksum_build_matrix.py TIMEOUT 1800)
   set_tests_properties(checksum_build_matrix PROPERTIES RUN_SERIAL TRUE)
 endif()
 

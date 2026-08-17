@@ -92,12 +92,16 @@ def get_runtime_protocol_value(key, default, env_name=None):
     return get_config_value(key, default)
 
 
+# 系统消息由 codegen 内置注入，不出现在 protocol.yaml 中
+SYSTEM_MESSAGE_IDS = {"Ack": 0xFD, "Heartbeat": 0xFE, "Handshake": 0xFF}
+
+
 def get_message_id(name):
-    if PROTOCOL_CONFIG and "messages" in PROTOCOL_CONFIG:
+    if PROTOCOL_CONFIG and PROTOCOL_CONFIG.get("messages"):
         for message in PROTOCOL_CONFIG["messages"]:
             if message["name"] == name:
                 return message["id"]
-    return None
+    return SYSTEM_MESSAGE_IDS.get(name)
 
 
 HEAD1 = int(get_runtime_protocol_value("head_byte_1", 0x5A, "AUTO_SERIAL_BRIDGE_HEAD1"))

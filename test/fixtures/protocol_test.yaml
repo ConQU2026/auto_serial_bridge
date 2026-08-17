@@ -11,8 +11,8 @@ config:
   checksum: "CRC8"
   require_handshake: true
   ignore_version_mismatch: false
-  enable_heartbeat: true
   strict_heartbeat: true
+  heartbeat_interval_ms: 1000
   heartbeat_timeout_ms: 3000
   reliable_retry_interval_ms: 100
   reliable_max_retries: 3
@@ -26,37 +26,6 @@ type_mappings:
   u32: "uint32_t"
 
 messages:
-  - name: "Ack"
-    id: 0xFD
-    direction: "both"
-    debug_log_mode: "off"
-    sub_topic: "auto_serial_bridge/system/ack"
-    pub_topic: "auto_serial_bridge/system/ack"
-    ros_msg: "std_msgs/msg/Int32MultiArray"
-    fields:
-      - { proto: "acked_id", type: "u8", ros: "data[0]" }
-      - { proto: "ack_seq", type: "u8", ros: "data[1]" }
-
-  - name: "Heartbeat"
-    id: 0xFE
-    direction: "both"
-    debug_log_mode: "off"
-    sub_topic: "auto_serial_bridge/system/heartbeat"
-    pub_topic: "auto_serial_bridge/system/heartbeat"
-    ros_msg: "std_msgs/msg/UInt32"
-    fields:
-      - { proto: "count", type: "u32", ros: "data" }
-
-  - name: "Handshake"
-    id: 0xFF
-    direction: "both"
-    debug_log_mode: "off"
-    sub_topic: "auto_serial_bridge/system/handshake"
-    pub_topic: "auto_serial_bridge/system/handshake"
-    ros_msg: "std_msgs/msg/UInt32"
-    fields:
-      - { proto: "protocol_hash", type: "u32", ros: "data" }
-
   - name: "FixtureCommand"
     id: 0x01
     direction: "tx"

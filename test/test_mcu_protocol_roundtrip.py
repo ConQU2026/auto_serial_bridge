@@ -1,3 +1,4 @@
+import re
 import struct
 import subprocess
 import sys
@@ -9,7 +10,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CODEGEN_SCRIPT = REPO_ROOT / "scripts" / "codegen.py"
-SAMPLE_CONFIG = REPO_ROOT / "config" / "protocol.yaml"
+SAMPLE_CONFIG = REPO_ROOT / "test" / "fixtures" / "protocol_test.yaml"
 HARNESS_SOURCE = REPO_ROOT / "test" / "test_mcu_main.c"
 
 
@@ -45,8 +46,17 @@ def _calculate_checksum(data: bytes, algorithm: str) -> int:
     raise ValueError(f"Unsupported checksum algorithm: {algorithm}")
 
 
+# 系统消息由 codegen 内置注入，不出现在 protocol.yaml 中
+SYSTEM_MESSAGE_IDS = {"Ack": 0xFD, "Heartbeat": 0xFE, "Handshake": 0xFF}
+
+
 def _message_ids(config: dict) -> dict[str, int]:
-    return {message["name"]: int(message["id"]) for message in config["messages"]}
+    ids = {
+        message["name"]: int(message["id"])
+        for message in (config.get("messages") or [])
+    }
+    ids.update(SYSTEM_MESSAGE_IDS)
+    return ids
 
 
 def _build_frame(config: dict, packet_id: int, payload: bytes) -> bytes:
@@ -72,6 +82,13 @@ def _parse_frame(config: dict, frame: bytes) -> tuple[int, bytes]:
     expected_checksum = _calculate_checksum(frame[2:-1], config["config"]["checksum"])
     assert checksum == expected_checksum
     return packet_id, payload
+
+
+def _generated_protocol_hash(tmp_path: Path) -> int:
+    header = (tmp_path / "generated" / "protocol.h").read_text(encoding="utf-8")
+    match = re.search(r"#define PROTOCOL_HASH 0x([0-9A-Fa-f]{8})", header)
+    assert match, "PROTOCOL_HASH not found in generated protocol.h"
+    return int(match.group(1), 16)
 
 
 def _extract_tx_frames(stdout: str) -> list[bytes]:
@@ -163,6 +180,7 @@ def test_compile_mcu_code(tmp_path):
 def test_handshake_roundtrip(tmp_path):
     config, executable = _generate_and_compile(tmp_path)
     ids = _message_ids(config)
+    local_hash = _generated_protocol_hash(tmp_path)
     payload = struct.pack("<I", 0x12345678)
     frame = _build_frame(config, ids["Handshake"], payload)
 
@@ -172,11 +190,12 @@ def test_handshake_roundtrip(tmp_path):
     assert result.returncode == 0
     assert "RX Handshake hash=0x12345678" in stdout
 
+    # 协议层自动回传本机 PROTOCOL_HASH（而非回显收到的哈希），由 ROS 端校验
     tx_frames = _extract_tx_frames(stdout)
     assert len(tx_frames) == 1
-    packet_id, echoed_payload = _parse_frame(config, tx_frames[0])
+    packet_id, reply_payload = _parse_frame(config, tx_frames[0])
     assert packet_id == ids["Handshake"]
-    assert echoed_payload == payload
+    assert reply_payload == struct.pack("<I", local_hash)
 
 
 def test_heartbeat_echo(tmp_path):
@@ -213,6 +232,7 @@ def test_checksum_mismatch_rejected(tmp_path):
 def test_fragmented_input(tmp_path):
     config, executable = _generate_and_compile(tmp_path)
     ids = _message_ids(config)
+    local_hash = _generated_protocol_hash(tmp_path)
     payload = struct.pack("<I", 7)
     frame = _build_frame(config, ids["Handshake"], payload)
 
@@ -225,9 +245,9 @@ def test_fragmented_input(tmp_path):
 
     tx_frames = _extract_tx_frames(stdout)
     assert len(tx_frames) == 1
-    packet_id, echoed_payload = _parse_frame(config, tx_frames[0])
+    packet_id, reply_payload = _parse_frame(config, tx_frames[0])
     assert packet_id == ids["Handshake"]
-    assert echoed_payload == payload
+    assert reply_payload == struct.pack("<I", local_hash)
 
 
 def test_noise_before_valid_frame(tmp_path):

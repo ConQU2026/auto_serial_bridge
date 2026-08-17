@@ -6,10 +6,8 @@
 #include <array>
 #include <deque>
 #include <functional>
-#include <mutex>
 #include <atomic>
 #include <chrono>
-#include <unordered_map>
 #include <cstddef>
 #include <cstdint>
 #include <algorithm>
@@ -129,14 +127,8 @@ namespace auto_serial_bridge
       return ignore_version_mismatch ? "ignore_mismatch" : "strict";
     }
 
-    inline const char *heartbeat_mode_name(
-        bool enable_heartbeat,
-        bool strict_heartbeat)
+    inline const char *heartbeat_mode_name(bool strict_heartbeat)
     {
-      if (!enable_heartbeat)
-      {
-        return "disabled";
-      }
       return strict_heartbeat ? "strict" : "warn_only";
     }
 
@@ -168,7 +160,7 @@ namespace auto_serial_bridge
             static_cast<unsigned int>(static_cast<uint8_t>(id)),
             port_.empty() ? "<unset>" : port_.c_str());
       }
-      async_send(bytes);
+      async_send(std::move(bytes));
     }
 
     template <typename T>
@@ -176,14 +168,7 @@ namespace auto_serial_bridge
     {
       auto bytes = packet_handler_.pack(id, data);
       post_serial([this, id, bytes = std::move(bytes)]() mutable
-                  {
-         if (!reliable_sender_) {
-           if (async_send_impl(bytes)) {
-             tx_packet_count_++;
-           }
-           return;
-         }
-         reliable_sender_->send(id, std::move(bytes)); });
+                  { reliable_sender_->send(id, std::move(bytes)); });
     }
 
     void add_subscription(std::shared_ptr<rclcpp::SubscriptionBase> sub)
@@ -191,25 +176,23 @@ namespace auto_serial_bridge
       subscriptions_.push_back(sub);
     }
 
-    void register_loopback_publisher(
-        PacketID id,
-        const std::shared_ptr<rclcpp::PublisherBase> &publisher);
-
-    bool should_skip_loopback(PacketID id, const rclcpp::MessageInfo &info) const;
-
   private:
+    struct TxRequest;
+
     void get_parameters();
     void publish_ready(bool ready);
     void start_receive();
-    void async_send(const std::vector<uint8_t> &packet_bytes);
-    bool async_send_impl(const std::vector<uint8_t> &packet_bytes);
+    void async_send(std::vector<uint8_t> packet_bytes);
+    void async_send_impl(
+        std::vector<uint8_t> packet_bytes,
+        std::function<void(bool)> completion = {});
     void start_next_write();
     void complete_serial_op();
     void notify_serial_ops_drained();
     void handle_write(
         const std::shared_ptr<asio::serial_port> &port,
         uint64_t generation,
-        const std::shared_ptr<std::vector<uint8_t>> &packet_bytes,
+        const std::shared_ptr<TxRequest> &request,
         const asio::error_code &error,
         size_t bytes_transferred);
     void log_mcu_tx(const std::vector<uint8_t> &packet_bytes) const;
@@ -218,13 +201,11 @@ namespace auto_serial_bridge
     void check_connection();
     void check_connection_impl();
     void reset_serial();
-    bool try_open_serial();
     bool try_open_serial_impl();
     void handle_heartbeat_timer();
     void handle_receive(
         const std::shared_ptr<asio::serial_port> &port,
         uint64_t generation,
-        const std::shared_ptr<std::array<uint8_t, 2048>> &buffer,
         const asio::error_code &error,
         size_t bytes_read);
     void handle_packet(const Packet &pkt);
@@ -250,18 +231,27 @@ namespace auto_serial_bridge
     std::unique_ptr<asio::io_service::strand> serial_strand_;
     std::shared_ptr<asio::serial_port> serial_port_;
     uint64_t connection_generation_ = 0;
-    std::deque<std::shared_ptr<std::vector<uint8_t>>> tx_queue_;
+    // 复用的接收缓冲区。同一时刻只有一个在途读操作（都在 strand 上串行），
+    // 析构时会等待所有串口操作 drain，因此生命周期安全。
+    std::array<uint8_t, 2048> rx_buffer_{};
+    struct TxRequest
+    {
+      std::vector<uint8_t> bytes;
+      std::function<void(bool)> completion;
+    };
+    static constexpr size_t MAX_TX_QUEUE_SIZE = 1024;
+    std::deque<std::shared_ptr<TxRequest>> tx_queue_;
     bool tx_write_in_progress_ = false;
     size_t pending_serial_ops_ = 0;
     bool shutdown_requested_ = false;
+    // 析构开始后置位；post_serial 不再接受新任务，避免任务在成员析构期间执行
+    std::atomic<bool> shutting_down_{false};
     std::function<void()> pending_serial_drain_callback_;
 
     PacketHandler packet_handler_;
     std::shared_ptr<ReliableSender> reliable_sender_;
 
     std::vector<std::shared_ptr<rclcpp::SubscriptionBase>> subscriptions_;
-    std::unordered_map<uint8_t, std::weak_ptr<rclcpp::PublisherBase>> loopback_publishers_;
-    mutable std::mutex loopback_publishers_mutex_;
 
     // 定时器和状态
     rclcpp::TimerBase::SharedPtr timer_;
@@ -271,14 +261,11 @@ namespace auto_serial_bridge
     bool ready_published_ = false;
     bool ready_state_ = false;
 
-    // 心跳跟踪
+    // 心跳跟踪（心跳始终开启，由本节点周期发起）
     uint32_t heartbeat_count_ = 0;
     uint32_t last_heartbeat_tx_count_ = 0;
     std::chrono::steady_clock::time_point heartbeat_ack_wait_started_at_;
-    std::chrono::steady_clock::time_point last_heartbeat_ack_time_;
     bool awaiting_heartbeat_ack_ = false;
-    bool heartbeat_ack_received_ = false;
-    bool enable_heartbeat_ = true;
     bool strict_heartbeat_ = true;
     int heartbeat_timeout_ms_ = 3000;
 
